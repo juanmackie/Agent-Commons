@@ -1,6 +1,6 @@
 # Operations readiness
 
-**Current decision: do not deploy yet.** The relay and bridge are validated locally, but no live TrueNAS, Tailscale, Hermes API, or two-device path has been verified. This checklist is a preflight; it does not authorize installing an app, changing a route, or starting an agent service.
+**Current decision: do not deploy yet.** The relay and bridge are validated locally, but no live TrueNAS, Tailscale, Hermes API, or two-device path has been verified. The separate-session Hermes API and Pi RPC bridges are legacy and do not meet [ADR 0001](adr/0001-live-session-agent-messaging.md); use [native session integration guidance](native-session-integrations.md). This checklist is a preflight; it does not authorize installing an app, changing a route, or starting an agent service.
 
 ## 1. Gather read-only facts
 
@@ -23,9 +23,13 @@ Before creating a container or touching TrueNAS:
 2. Build a minimal non-root image from `Dockerfile`; it pins the Python base-image index digest and installs only hash-pinned runtime dependencies from `requirements.txt`. The `.dockerignore` limits the build context to the Dockerfile, lock export, and relay source. Build on an approved host with `docker build --tag agent-room-relay:<reviewed-tag> .`, then record `docker image inspect --format '{{.Id}}' agent-room-relay:<reviewed-tag>`. Do not publish the image without separate authorization.
 3. Fill `deploy/compose.yaml` only after live discovery. Replace every required variable with verified values; bind the published host port to `127.0.0.1`, mount only the verified persistent dataset at `/data`, and choose resource limits from measurements. Do not deploy `docs/trueNAS-compose.env.example` as-is.
 4. Run a disposable-container create, health, message, recreate, and persistence test. Confirm the chosen dataset mount and resource limits using evidence, not estimates.
-5. Verify the real Pi adapter and the fail-closed Hermes adapter against the installed versions. Exercise harmless multi-turn context, restart, timeout, and rate-limit behavior. Do not use Telegram/CLI-owned sessions.
+5. Verify the native Pi extension and Hermes plugin against the installed hosts using the participants' existing active sessions. Exercise harmless multi-turn context, unavailable-session/relay behavior, destructive-action approval and denial, and thread continuity. Do not use substitute bridge-owned sessions. See [native session integrations](native-session-integrations.md); the legacy adapters are not acceptance evidence.
 
-## 3. Hermes API safety gate
+<a id="hermes-api-safety-gate"></a>
+
+## 3. Legacy Hermes API adapter safety gate
+
+This gate applies only if an operator separately needs to test the old `/v1/responses` bridge. Passing it does not satisfy native-session acceptance and must not be used to claim live collaboration.
 
 The Hermes adapter sends untrusted peer text to the local authenticated `/v1/responses` API. The installed default API toolset can run host tools, so **do not start the Hermes bridge until the effective API tool surface is empty**.
 
@@ -62,7 +66,7 @@ Only after the local and deployment gates pass, run a real three-exchange task: 
 
 ## Current evidence
 
-- `uv run --frozen python -m pytest -q -p no:cacheprovider`: 54 passed on Python 3.12.13 after adding the monitor steering path. Tests include real loopback HTTP, authenticated bridge writes, unauthenticated monitor reads and steering, bridge recovery, Hermes fake-API Responses/idempotency, retry-window expiry, completion, and legacy SQLite migrations.
-- `bash verification/run.sh` passed on Python 3.12.13; it ran 54 tests, parsed the Compose template and checked its security invariants, built the source/wheel, and verified module inclusion. Frozen sync/lock checks also passed. The Python base-image index digest was queried from Docker's official registry. Docker is unavailable here, so the Docker image build and container lifecycle test remain unverified.
-- Read-only Hermes status shows its gateway stopped and no usable provider login. The adapter's `/v1/responses` and `/v1/toolsets` protocol is covered with fake transports only; no Hermes API or Pi model call has been made.
-- No TrueNAS host, app inventory, dataset, port, or cross-machine connectivity has been inspected. Read-only Tailscale status on this Windows workstation shows the client running/online, four peers, one local Serve web port/handler and one TCP entry, with Funnel disabled; names and addresses were not recorded, and the Serve configuration cannot be attributed to TrueNAS. No service or route has been changed.
+- `bash verification/run.sh` passed at `2026-10-31T08:41:08Z` on Python 3.12.13. The project suite reported 74 passed and 1 skipped; the skip is the Hermes host-hook seam test because `hermes_cli` is not on the project interpreter path. The Pi suite reported 31 passed. Compose security checks and source/wheel build passed. Evidence: `verification/evidence/local-20261031T084108Z.txt`.
+- The current Pi extension loaded through the installed Pi 1.4.0 extension loader and registered its send tool and five handlers. The smoke made no session, model, or relay call. The Hermes plugin test file passed with the installed Hermes 0.18.2 interpreter: 21 passed. It exercises the native pre-tool approval resolver with exact details, denial/approval, and approval-gate failure outcomes, but it does not drive an active conversation. Pytest emitted an existing `pytest-asyncio` fixture-loop-scope deprecation warning.
+- Read-only checks on 2026-10-31 found no Hermes gateway process and no Python process command line matching the installed Hermes agent path. The last provider check found no usable login. A subsequent process check found one Pi-Bolt process, but its command line exposed no session ID or integration path, so it was not matched to the requested session or contacted. The operator deferred live testing. No live Hermes API call, Pi model call, or exchange through either existing active session has been made. The legacy `/v1/responses` and `/v1/toolsets` protocol remains covered only with fake transports.
+- Docker is unavailable, so the Docker image build and container lifecycle test remain unverified. No TrueNAS host, app inventory, dataset, port, or cross-machine connectivity has been inspected. The prior read-only Tailscale check found the client online with Funnel disabled, but could not attribute its local Serve configuration to TrueNAS. No service or route has been changed.

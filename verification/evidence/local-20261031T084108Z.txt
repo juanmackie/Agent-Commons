@@ -1,0 +1,58 @@
+Agent Commons local verification
+UTC: 20261031T084108Z
+Scope: project, Hermes-plugin, and Pi-extension tests plus package and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+Checked 29 packages in 2ms
+Resolved 30 packages in 1ms
+Python: 3.12.13
+.......................................................s................ [ 96%]
+...                                                                      [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] integrations\hermes\agent-commons\test_plugin.py:51: could not import 'hermes_cli.plugins': No module named 'hermes_cli'
+74 passed, 1 skipped in 1.12s
+✔ incoming relay data is durable before delivery and remains assigned to its exact session (1.4001ms)
+✔ messages cannot be queued without a verified target session (0.6429ms)
+✔ full inbox does not advance past an unpersisted target message (1.4528ms)
+✔ completion durably closes the thread and drops later messages from model delivery (1.0921ms)
+✔ approved outbound payload persists with a stable retry ID until acknowledged (0.4984ms)
+✔ completion notices are visible in session history without a user-model turn (0.2094ms)
+✔ acknowledgment is one-session-only and marks the relay message seen (0.2928ms)
+✔ only one Pi process can own an inbox until its owner releases the lock (22.78ms)
+✔ peer delivery metadata is recovered from current prompt and persisted session history (2.3769ms)
+✔ peer provenance survives a later user turn and ignores non-user and malformed entries (0.4124ms)
+✔ read-only tools do not ask for destructive-action approval (1.6024ms)
+✔ peer side effects and every outbound relay message require human review (0.2955ms)
+✔ unknown or side-effecting tools require exact human approval (1.1144ms)
+✔ outbound envelope resolves recipient and preserves the peer thread before approval (1.0698ms)
+✔ closed or exhausted peer threads cannot accept another reply (0.661ms)
+✔ closed thread IDs are rejected even after peer context has ended (0.2493ms)
+✔ legacy roomctl sends are gated as outbound messages (0.2265ms)
+✔ relay message approval shows the exact recipient and message body (0.8436ms)
+✔ denial and missing UI block peer-requested actions (1.2126ms)
+✔ oversized action details are blocked instead of asking ambiguous approval (0.325ms)
+✔ relay poll authenticates and rejects redirects (26.3464ms)
+✔ relay post validates and sends a bounded message to the authenticated API (1.2735ms)
+✔ relay client refuses unsafe endpoints and invalid message shapes (1.3146ms)
+✔ malformed send receipts fail closed so the durable outbox can retry (0.5795ms)
+✔ malformed envelopes and out-of-order relay messages fail closed (0.7381ms)
+✔ relay API failures fail closed (0.3312ms)
+✔ oversized relay responses are rejected before JSON parsing (4.9242ms)
+✔ peer provenance and cursor survive a Pi session restart (11.5177ms)
+✔ pending relay payload and room identity survive restart, and room changes fail closed (5.4042ms)
+✔ legacy pending messages bind only to their persisted session owner (6.5115ms)
+✔ corrupt peer provenance fails closed rather than dropping the approval gate (3.1595ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 176.5551
+Compose structure, loopback bind, non-root/read-only policy, persistent mount, and pinned base: PASS
+Source/wheel build: PASS
+Source/wheel build and installed module inclusion: PASS
+Docker image/container lifecycle: NOT RUN (Docker CLI unavailable).
+Active Hermes/Pi session exchange, live permission outcomes, and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md).
+Evidence saved: verification/evidence/local-20261031T084108Z.txt

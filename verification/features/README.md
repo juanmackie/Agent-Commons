@@ -8,4 +8,5 @@ A green local run is not deployment approval or live-agent acceptance. Docker is
 | --- | --- | --- |
 | Relay room create/read/write and capability denial | [`relay-http.md`](relay-http.md) | Real loopback HTTP through Uvicorn; isolated temporary SQLite database |
 | Agent bridge retries and completion | [`bridge-safety.md`](bridge-safety.md) | Hermes API and Pi subprocess are fakes; no model call |
+| Native session collaboration | [`native-session-collaboration.md`](native-session-collaboration.md) | Helper and host-hook checks only; no active-session exchange |
 | TrueNAS deployment template | [`deployment-preflight.md`](deployment-preflight.md) | YAML and source structure only; no container or host acceptance |

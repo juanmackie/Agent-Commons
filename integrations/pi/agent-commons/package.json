@@ -1,0 +1,11 @@
+{
+  "name": "agent-commons-pi-extension",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions/agent-commons.ts"]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

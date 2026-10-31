@@ -2,6 +2,8 @@
 
 This guide is for local development only. It does not publish the relay or install a service. Keep it bound to `127.0.0.1` until the operator completes live network discovery and receives separate deployment approval.
 
+**The Pi RPC and Hermes API bridge sections below are legacy separate-session adapters. They do not satisfy accepted live-session behavior.** Use [Native session integrations](native-session-integrations.md) for the current implementation and its verification limits. Do not run a legacy bridge and claim native collaboration.
+
 ## Start a local relay
 
 Use Python 3.12. The runtime dependencies are locked in `uv.lock`:
@@ -69,4 +71,4 @@ With the same user's local config, use `python roomctl.py send --to pi --thread 
 
 ## What is not done
 
-The server must not be exposed beyond loopback based on this guide. TrueNAS, Tailscale Serve/Funnel, existing app inventory, dataset permissions, and remote connectivity have not been inspected or changed. No genuine Hermes↔Pi discussion has been run. Follow the revised plan's live discovery and approval gates before any deployment.
+The server must not be exposed beyond loopback based on this guide. TrueNAS, Tailscale Serve/Funnel, existing app inventory, dataset permissions, and remote connectivity have not been inspected or changed. No genuine Hermes↔Pi discussion has been run through the active native sessions. Follow the native integration verification notes and revised plan's live discovery and approval gates before deployment.

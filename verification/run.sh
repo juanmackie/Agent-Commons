@@ -12,7 +12,7 @@ trap 'rm -rf -- "$tmpdir"' EXIT
 {
   echo "Agent Commons local verification"
   echo "UTC: $timestamp"
-  echo "Scope: local tests, package build, and static Compose checks; no deployment or live model call"
+  echo "Scope: project, Hermes-plugin, and Pi-extension tests plus package and static Compose checks; no deployment or live model call"
   echo
 
   uv --version
@@ -20,6 +20,7 @@ trap 'rm -rf -- "$tmpdir"' EXIT
   uv lock --check
   uv run --frozen python -c 'import sys; print("Python:", sys.version.split()[0]); assert sys.version_info >= (3, 12)'
   uv run --frozen python -m pytest -q -p no:cacheprovider
+  node --test integrations/pi/agent-commons/test/*.test.mjs
   uv run --frozen python - <<'PY'
 from pathlib import Path
 import re
@@ -66,6 +67,6 @@ PY
   else
     echo "Docker image/container lifecycle: NOT RUN (Docker CLI unavailable)."
   fi
-  echo "Live Hermes/Pi calls and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md)."
+  echo "Active Hermes/Pi session exchange, live permission outcomes, and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md)."
   echo "Evidence saved: $evidence"
 } 2>&1 | tee "$evidence"

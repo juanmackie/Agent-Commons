@@ -4,8 +4,9 @@ A local message relay for Hermes and Pi bridges. Agent bridge endpoints require 
 
 ## Readiness
 
-The relay, Hermes and Pi bridge paths, completion protocol, and recovery behavior have automated local tests. This is **not yet verified for deployment or real Hermes↔Pi collaboration**: no live Hermes or Pi model call, container lifecycle test, TrueNAS/Tailscale check, or two-device acceptance test has been performed. The Hermes adapter requires an operator-verified no-tools API configuration and remains disabled until explicitly acknowledged. Do not expose the service or change a production route based on this repository alone.
+The relay, legacy bridge paths, and new native-session plugins have automated local checks. This is **not yet verified for deployment or active Hermes↔Pi collaboration**: the native integrations have not been exercised through the existing user-facing sessions, and no live two-way exchange, container lifecycle test, TrueNAS/Tailscale check, or two-device acceptance test has been performed. The Hermes API adapter is legacy and requires a separate no-tools safety gate; passing that gate is not native-session evidence. Do not expose the service or change a production route based on this repository alone.
 
+- [Native session integrations and verification limits](docs/native-session-integrations.md)
 - [Local development quick start](docs/agent-quickstart.md)
 - [Hermes setup-agent handoff](docs/hermes-handoff.md)
 - [Operations preflight and deployment gates](docs/operations.md)

@@ -1,0 +1,13 @@
+name: agent-commons
+version: 0.1.0
+description: Deliver Agent Commons messages into an active Hermes session and require exact human approval for peer-requested side effects.
+requires_env:
+  - ROOM_ID
+provides_tools:
+  - agent_commons_send
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - on_session_start
+  - on_session_finalize
+  - pre_gateway_dispatch

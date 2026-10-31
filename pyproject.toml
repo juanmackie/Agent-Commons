@@ -19,7 +19,7 @@ test = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "integrations/hermes/agent-commons"]
 addopts = "-ra -p no:cacheprovider"
 
 [tool.setuptools]

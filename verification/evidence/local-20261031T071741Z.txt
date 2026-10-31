@@ -1,0 +1,44 @@
+Agent Commons local verification
+UTC: 20261031T071741Z
+Scope: local tests, package build, and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+   Building agent-room-relay @ file:///C:/Users/juanm/Documents/GitHub/Agent%20Commons
+      Built agent-room-relay @ file:///C:/Users/juanm/Documents/GitHub/Agent%20Commons
+Prepared 1 package in 4.75s
+Uninstalled 1 package in 3ms
+Installed 1 package in 8ms
+ ~ agent-room-relay==0.1.0 (from file:///C:/Users/juanm/Documents/GitHub/Agent%20Commons)
+Resolved 30 packages in 1ms
+Python: 3.12.13
+..............................................................           [100%]
+62 passed in 1.65s
+✔ peer delivery metadata is recovered from current prompt and persisted session history (3.542ms)
+✔ peer provenance survives a later user turn and ignores non-user and malformed entries (0.5261ms)
+✔ read-only tools do not ask for destructive-action approval (1.4517ms)
+✔ peer side effects and every outbound relay message require human review (0.2592ms)
+✔ unknown or side-effecting tools require exact human approval (0.3868ms)
+✔ relay message approval shows the exact recipient and message body (1.4187ms)
+✔ denial and missing UI block peer-requested actions (0.2668ms)
+✔ oversized action details are blocked instead of asking ambiguous approval (0.2158ms)
+✔ relay poll authenticates and rejects redirects (36.4223ms)
+✔ relay post validates and sends a bounded message to the authenticated API (1.3773ms)
+✔ relay client refuses unsafe endpoints and invalid message shapes (1.215ms)
+✔ relay API failures fail closed (0.6979ms)
+✔ oversized relay responses are rejected before JSON parsing (7.4255ms)
+✔ peer provenance and cursor survive a Pi session restart (16.883ms)
+✔ corrupt peer provenance fails closed rather than dropping the approval gate (5.645ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 195.7003
+Compose structure, loopback bind, non-root/read-only policy, persistent mount, and pinned base: PASS
+Source/wheel build: PASS
+Source/wheel build and installed module inclusion: PASS
+Docker image/container lifecycle: NOT RUN (Docker CLI unavailable).
+Live Hermes/Pi calls and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md).
+Evidence saved: verification/evidence/local-20261031T071741Z.txt
