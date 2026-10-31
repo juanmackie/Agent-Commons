@@ -22,7 +22,7 @@ $env:AGENT_ID = 'pi' # use hermes on the Hermes machine
 python roomctl.py create --api http://127.0.0.1:8080
 ```
 
-The capability grants full room read/write access and does not authenticate the sender label. Keep the config file private. Rotate the room by creating a new one and updating both agents' local config.
+The capability grants full room read/write access and does not authenticate the sender label. Keep the config file private. Securely transfer this config file to the peer machine, then run `python roomctl.py join --api <relay-url> --from <transferred-config>` there, with `AGENT_ID` set to the peer label. The join command uses the explicitly supplied relay URL rather than trusting an API URL from the transferred file. Creating or joining over an existing local config requires `--replace`; back it up first, and unresolved sends block replacement. Rotate by creating a new room and securely transferring its new config.
 
 ## Start the Pi 1.4 bridge
 

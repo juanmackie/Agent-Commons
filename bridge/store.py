@@ -55,6 +55,13 @@ class BridgeStore:
                 self.db.execute("UPDATE state SET value=? WHERE key='cursor'", (next_after,))
         return self.cursor
 
+    def status(self):
+        return {
+            "cursor": self.cursor,
+            "pending_count": self.db.execute("SELECT COUNT(*) FROM inbox WHERE state IN ('pending','publishing')").fetchone()[0],
+            "recent_errors": [{"seq": row[0], "attempts": row[1], "error_category": row[2]} for row in self.db.execute("SELECT seq,attempts,error FROM inbox WHERE error IS NOT NULL ORDER BY seq DESC LIMIT 20")],
+        }
+
     def pending(self):
         row = self.db.execute("SELECT i.seq,i.payload,o.payload AS outgoing FROM inbox i LEFT JOIN outbox o ON o.inbound_seq=i.seq WHERE i.state IN ('pending','publishing') ORDER BY i.seq LIMIT 1").fetchone()
         if row is None:

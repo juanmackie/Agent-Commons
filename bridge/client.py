@@ -1,6 +1,7 @@
 """Small synchronous relay client; bearer secret is held only in memory."""
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,9 +11,28 @@ class RelayError(Exception):
     pass
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirectHandler)
+
+
+def validate_api_url(base_url: str) -> str:
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("relay API must be an HTTP(S) URL without user info, query, or fragment")
+    if parsed.scheme == "http" and parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("plain HTTP is allowed only for loopback relay endpoints")
+    return base_url.rstrip("/")
+
+
 class RelayClient:
     def __init__(self, base_url: str, room_id: str, timeout: float = 20):
-        self.base_url = base_url.rstrip("/")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", room_id):
+            raise ValueError("room capability must be a 256-bit URL-safe token")
+        self.base_url = validate_api_url(base_url)
         self.room_id = room_id
         self.timeout = timeout
 
@@ -23,7 +43,7 @@ class RelayClient:
             "Content-Type": "application/json",
         })
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _opener.open(request, timeout=self.timeout) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as error:
             raise RelayError(f"relay returned HTTP {error.code}") from None
@@ -39,9 +59,9 @@ class RelayClient:
 
     @classmethod
     def create_room(cls, base_url: str, timeout: float = 20):
-        request = urllib.request.Request(base_url.rstrip("/") + "/v1/rooms", data=b"", method="POST")
+        request = urllib.request.Request(validate_api_url(base_url) + "/v1/rooms", data=b"", method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _opener.open(request, timeout=timeout) as response:
                 return json.loads(response.read())
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
             raise RelayError(f"room creation failed: {type(error).__name__}") from None

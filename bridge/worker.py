@@ -1,5 +1,7 @@
 """Single-threaded poller and bounded message worker."""
 
+import math
+import re
 import time
 import uuid
 
@@ -9,6 +11,16 @@ from bridge.adapters.base import AgentResult
 class BridgeWorker:
     def __init__(self, relay, store, adapter, *, agent_id: str, poll_seconds: float = 3,
                  max_auto_replies_per_thread: int = 4, max_hop: int = 8, agent_timeout: float = 300):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id):
+            raise ValueError("agent_id must be 1-64 letters, digits, underscores, or hyphens")
+        if not math.isfinite(poll_seconds) or not 0.5 <= poll_seconds <= 60:
+            raise ValueError("poll_seconds must be finite and between 0.5 and 60")
+        if not 0 <= max_auto_replies_per_thread <= 4:
+            raise ValueError("max_auto_replies_per_thread must be between 0 and 4")
+        if not 0 <= max_hop <= 8:
+            raise ValueError("max_hop must be between 0 and 8")
+        if not math.isfinite(agent_timeout) or not 0 < agent_timeout <= 3600:
+            raise ValueError("agent_timeout must be finite and between 0 and 3600 seconds")
         self.relay = relay
         self.store = store
         self.adapter = adapter
