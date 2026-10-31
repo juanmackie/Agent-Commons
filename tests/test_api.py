@@ -29,9 +29,20 @@ def test_two_clients_auth_pagination_replay_and_conflict(client):
             first = await c.post("/v1/messages", headers=headers, json=msg)
             replay = await c.post("/v1/messages", headers=headers, json=msg)
             assert first.status_code == 201 and replay.status_code == 200
+            assert first.json()["complete"] is False
             assert first.json()["seq"] == replay.json()["seq"]
             changed = await c.post("/v1/messages", headers=headers, json=msg | {"text":"changed"})
             assert changed.status_code == 409
+            final = await c.post("/v1/messages", headers=headers, json=msg | {
+                "client_msg_id": "cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14", "complete": True,
+            })
+            assert final.status_code == 201 and final.json()["complete"] is True
+            invalid_complete = await c.post("/v1/messages", headers=headers, json=msg | {
+                "client_msg_id": "cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15", "complete": "true",
+            })
+            assert invalid_complete.status_code == 422
+            changed_completion = await c.post("/v1/messages", headers=headers, json=msg | {"complete": True})
+            assert changed_completion.status_code == 409
             assert (await c.get("/v1/messages?after=0&limit=1", headers=headers)).json() == {"messages":[first.json()], "next_after":1}
             assert (await c.get("/v1/messages", headers={"Authorization":"Bearer invalid"})).json() == {"detail":"invalid room id"}
             assert (await c.get("/healthz")).json() == {"status":"ok"}
@@ -66,6 +77,11 @@ def test_message_size_and_validation(client):
             msg = {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c13", "sender":"hermes", "recipient":"pi", "thread_id":"b3d9dcc7-137c-481f-b268-2a40c7e20c88", "reply_to":None, "hop":0, "text":"é" * 8193}
             assert (await c.post("/v1/messages", headers=headers, json=msg)).status_code == 413
             assert (await c.post("/v1/messages", headers=headers, content="{" )).status_code in (400, 422)
+            invalid_payload = json.dumps(msg | {
+                "client_msg_id": "cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c16", "text": "\ud800",
+            })
+            invalid_utf8 = await c.post("/v1/messages", headers=headers, content=invalid_payload)
+            assert invalid_utf8.status_code == 422
     try:
         asyncio.run(scenario())
     finally:

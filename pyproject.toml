@@ -24,3 +24,4 @@ addopts = "-ra -p no:cacheprovider"
 
 [tool.setuptools]
 packages = ["app", "bridge", "bridge.adapters"]
+py-modules = ["roomctl"]

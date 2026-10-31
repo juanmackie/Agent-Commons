@@ -34,7 +34,7 @@ class PiRpcAdapter:
         return [executable, "--mode", "rpc", "--session-dir", str(self.session_dir), "--session-id", session_id,
                 "--no-tools", "--no-mcp", "--no-extensions", "--no-context-files"]
 
-    def run(self, *, thread_id: str, session_ref: str | None, prompt: str, timeout: float) -> AgentResult:
+    def run(self, *, thread_id: str, session_ref: str | None, prompt: str, timeout: float, request_id: str | None = None) -> AgentResult:
         try:
             parsed_thread = uuid.UUID(thread_id)
         except ValueError:

@@ -1,4 +1,8 @@
 __pycache__/
+*.egg-info/
+dist/
+build/
+pytest-of-*/
 *.py[cod]
 .pytest_cache/
 .venv/
@@ -10,3 +14,4 @@ __pycache__/
 *.sqlite3-shm
 *.db
 .uv-cache/
+/.pi

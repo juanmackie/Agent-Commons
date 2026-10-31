@@ -19,7 +19,7 @@ def run(adapter):
         raise RuntimeError("missing bridge configuration: " + ", ".join(missing))
     relay = RelayClient(api, room_id)
     state = BridgeStore(state_path)
-    worker = BridgeWorker(relay, state, adapter, agent_id=os.environ["AGENT_ID"],
+    worker = BridgeWorker(relay, state, adapter, agent_id=agent_id,
                           poll_seconds=float(os.getenv("POLL_SECONDS", "3")),
                           max_auto_replies_per_thread=int(os.getenv("MAX_AUTO_REPLIES_PER_THREAD", "4")),
                           max_hop=int(os.getenv("MAX_HOP", "8")))
@@ -27,15 +27,32 @@ def run(adapter):
 
 
 def main():
-    agent_id = os.getenv("AGENT_ID", "")
-    if agent_id != "pi":
-        raise SystemExit("The installed Hermes API adapter is not implemented; AGENT_ID must be pi for this runner.")
+    from roomctl import config_path, read_config
+    config = read_config() if config_path().exists() else {}
+    agent_id = os.getenv("AGENT_ID") or config.get("agent_id")
+    if agent_id not in {"pi", "hermes"}:
+        raise SystemExit("AGENT_ID must be pi or hermes")
     state_path = os.getenv("BRIDGE_STATE_DB")
     if not state_path:
         raise SystemExit("BRIDGE_STATE_DB is required")
-    session_dir = os.getenv("PI_SESSION_DIR", state_path + ".pi-sessions")
-    from bridge.adapters.pi_rpc import PiRpcAdapter
-    run(PiRpcAdapter(session_dir))
+    if agent_id == "pi":
+        session_dir = os.getenv("PI_SESSION_DIR", state_path + ".pi-sessions")
+        from bridge.adapters.pi_rpc import PiRpcAdapter
+        run(PiRpcAdapter(session_dir))
+        return
+
+    api_key = os.getenv("HERMES_API_KEY")
+    toolsets_verified = os.getenv("HERMES_API_TOOLSETS_VERIFIED") == "none"
+    from bridge.adapters.hermes_api import HermesApiAdapter
+    try:
+        adapter = HermesApiAdapter(
+            os.getenv("HERMES_API_URL", "http://127.0.0.1:8642"),
+            api_key or "",
+            toolsets_verified=toolsets_verified,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    run(adapter)
 
 
 if __name__ == "__main__":

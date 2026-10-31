@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 from app.store import Conflict, MessageCapacity, RoomCapacity, RoomStore
 
@@ -28,6 +28,7 @@ class MessageInput(BaseModel):
     reply_to: StrictInt | None
     hop: StrictInt = Field(ge=0, le=8)
     text: StrictStr
+    complete: StrictBool = False
 
     @field_validator("client_msg_id", "thread_id")
     @classmethod
@@ -58,6 +59,10 @@ class MessageInput(BaseModel):
     def valid_text(cls, value):
         if not value:
             raise ValueError("must not be empty")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("must be valid UTF-8 text") from None
         return value
 
 

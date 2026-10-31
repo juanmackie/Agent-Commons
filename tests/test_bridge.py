@@ -1,4 +1,6 @@
 import json
+import sqlite3
+import time
 
 import pytest
 
@@ -40,7 +42,7 @@ class FakeAgent:
 
     def run(self, **kwargs):
         self.calls += 1
-        return AgentResult("answer")
+        return AgentResult('{"reply":"answer","complete":false}')
 
 
 class FailingAgent:
@@ -52,10 +54,19 @@ class FailingAgent:
         raise TimeoutError("simulated agent timeout")
 
 
+class CompletingAgent:
+    def __init__(self):
+        self.calls = 0
+
+    def run(self, **kwargs):
+        self.calls += 1
+        return AgentResult('{"reply":"final answer","complete":true}')
+
+
 def message(seq=1, sender="hermes", recipient="pi", hop=0):
     return {"seq": seq, "client_msg_id": str(seq), "sender": sender, "recipient": recipient,
             "thread_id":"b3d9dcc7-137c-481f-b268-2a40c7e20c88", "reply_to":None,
-            "hop":hop, "text":"review this", "created_at":"2026-10-31T00:00:00Z"}
+            "hop":hop, "text":"review this", "complete":False, "created_at":"2026-10-31T00:00:00Z"}
 
 
 @pytest.mark.parametrize(("agent_id", "options"), [
@@ -192,6 +203,26 @@ def test_two_fake_agents_complete_bounded_multi_turn_exchange():
     assert pi_store.thread_reply_count(message()["thread_id"]) == 4
 
 
+def test_explicit_completion_is_published_and_stops_the_peer_without_another_model_call():
+    relay = FakeRelay([message()])
+    pi_store = BridgeStore(":memory:")
+    hermes_store = BridgeStore(":memory:")
+    final_agent = CompletingAgent()
+    hermes_agent = FakeAgent()
+    pi = BridgeWorker(relay, pi_store, final_agent, agent_id="pi")
+    hermes = BridgeWorker(relay, hermes_store, hermes_agent, agent_id="hermes")
+
+    pi.poll_once()
+    assert pi.work_once()
+    assert relay.messages[-1]["complete"] is True
+    hermes.poll_once()
+    assert hermes.work_once()  # Ignore the original message addressed to Pi.
+    assert hermes.work_once()  # Observe the explicit thread-completion message.
+    assert hermes_agent.calls == 0
+    assert hermes_store.thread_is_closed(message()["thread_id"])
+    assert len(relay.posts) == 1
+
+
 def test_agent_failures_exhaust_thread_budget_and_require_explicit_retry():
     relay = FakeRelay([message()])
     state = BridgeStore(":memory:")
@@ -218,6 +249,66 @@ def test_agent_failures_exhaust_thread_budget_and_require_explicit_retry():
     assert state.pending() is None
     assert state.thread_attempt_count(message()["thread_id"]) == 1
     assert state.thread_reply_count(message()["thread_id"]) == 1
+
+
+def test_hermes_adapter_timeout_is_bounded_by_remaining_idempotency_window():
+    class TimeoutObservingAgent(FailingAgent):
+        idempotency_window_seconds = 240
+
+        def run(self, **kwargs):
+            self.timeout = kwargs["timeout"]
+            return super().run(**kwargs)
+
+    relay = FakeRelay([message()])
+    state = BridgeStore(":memory:")
+    agent = TimeoutObservingAgent()
+    worker = BridgeWorker(relay, state, agent, agent_id="pi", agent_timeout=300)
+    worker.poll_once()
+    state.db.execute("UPDATE inbox SET agent_started_at=? WHERE seq=1", (time.time() - 239,))
+
+    with pytest.raises(TimeoutError):
+        worker.work_once()
+
+    assert 0 < agent.timeout <= 1
+
+
+def test_hermes_retry_window_expires_closed_after_bridge_restart():
+    class IdempotentFailingAgent(FailingAgent):
+        idempotency_window_seconds = 240
+
+    relay = FakeRelay([message()])
+    state = BridgeStore(":memory:")
+    agent = IdempotentFailingAgent()
+    worker = BridgeWorker(relay, state, agent, agent_id="pi", max_auto_replies_per_thread=4)
+    worker.poll_once()
+
+    with pytest.raises(TimeoutError):
+        worker.work_once()
+    state.db.execute("UPDATE inbox SET agent_started_at=? WHERE seq=1", (time.time() - 241,))
+
+    assert worker.work_once()
+    assert agent.calls == 1
+    assert state.pending() is None
+    assert state.status()["recent_errors"][0]["error_category"].startswith("idempotency_window_expired:TimeoutError")
+
+
+def test_legacy_bridge_inbox_migrates_request_start_timestamp(tmp_path):
+    path = tmp_path / "legacy-bridge.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+          CREATE TABLE state(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+          INSERT INTO state VALUES('cursor', 1);
+          CREATE TABLE inbox(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
+          CREATE TABLE outbox(inbound_seq INTEGER PRIMARY KEY REFERENCES inbox(seq), payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending');
+          CREATE TABLE thread_sessions(thread_id TEXT PRIMARY KEY, session_ref TEXT, reply_count INTEGER NOT NULL DEFAULT 0, agent_attempts INTEGER NOT NULL DEFAULT 0);
+        """)
+        db.execute("INSERT INTO inbox(seq,payload) VALUES(1,?)", (json.dumps(message()),))
+
+    state = BridgeStore(path)
+    assert state.pending()[1]["text"] == "review this"
+    assert state.agent_attempt_age(1) is None
+    assert state.begin_agent_attempt(1, message()["thread_id"], 4)
+    assert state.agent_attempt_age(1) is not None
 
 
 def test_operator_retry_preserves_successful_thread_reply_budget():

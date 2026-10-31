@@ -112,7 +112,7 @@ def main(argv=None):
         agent_id = config.get("agent_id", "hermes")
         if args.command == "send":
             payload = {"client_msg_id": str(uuid.uuid4()), "sender": agent_id, "recipient": args.to,
-                       "thread_id": str(uuid.UUID(args.thread)), "reply_to": None, "hop": 0, "text": args.text}
+                       "thread_id": str(uuid.UUID(args.thread)), "reply_to": None, "hop": 0, "text": args.text, "complete": False}
             db = state_db()
             existing = db.execute("SELECT client_msg_id,payload FROM pending LIMIT 1").fetchone()
             serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)

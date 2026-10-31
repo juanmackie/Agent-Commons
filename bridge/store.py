@@ -3,6 +3,7 @@
 import contextlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -19,13 +20,18 @@ class BridgeStore:
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
           INSERT OR IGNORE INTO state VALUES('cursor', 0);
-          CREATE TABLE IF NOT EXISTS inbox(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
+          CREATE TABLE IF NOT EXISTS inbox(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error TEXT, agent_started_at REAL);
           CREATE TABLE IF NOT EXISTS outbox(inbound_seq INTEGER PRIMARY KEY REFERENCES inbox(seq), payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending');
-          CREATE TABLE IF NOT EXISTS thread_sessions(thread_id TEXT PRIMARY KEY, session_ref TEXT, reply_count INTEGER NOT NULL DEFAULT 0, agent_attempts INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE IF NOT EXISTS thread_sessions(thread_id TEXT PRIMARY KEY, session_ref TEXT, reply_count INTEGER NOT NULL DEFAULT 0, agent_attempts INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0);
         """)
+        inbox_columns = {row[1] for row in self.db.execute("PRAGMA table_info(inbox)")}
+        if "agent_started_at" not in inbox_columns:
+            self.db.execute("ALTER TABLE inbox ADD COLUMN agent_started_at REAL")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(thread_sessions)")}
         if "agent_attempts" not in columns:
             self.db.execute("ALTER TABLE thread_sessions ADD COLUMN agent_attempts INTEGER NOT NULL DEFAULT 0")
+        if "closed" not in columns:
+            self.db.execute("ALTER TABLE thread_sessions ADD COLUMN closed INTEGER NOT NULL DEFAULT 0")
 
     @contextlib.contextmanager
     def _write_transaction(self):
@@ -79,11 +85,21 @@ class BridgeStore:
             row = self.db.execute("SELECT agent_attempts,reply_count FROM thread_sessions WHERE thread_id=?", (thread_id,)).fetchone()
             if row[0] >= max_per_thread or row[1] >= max_per_thread:
                 return False
-            updated = self.db.execute("UPDATE inbox SET attempts=attempts+1 WHERE seq=? AND state='pending'", (seq,)).rowcount
+            updated = self.db.execute(
+                "UPDATE inbox SET attempts=attempts+1,agent_started_at=COALESCE(agent_started_at,?) WHERE seq=? AND state='pending'",
+                (time.time(), seq),
+            ).rowcount
             if not updated:
                 return False
             self.db.execute("UPDATE thread_sessions SET agent_attempts=agent_attempts+1 WHERE thread_id=?", (thread_id,))
             return True
+
+    def agent_attempt_age(self, seq):
+        row = self.db.execute("SELECT agent_started_at FROM inbox WHERE seq=?", (seq,)).fetchone()
+        if row is None or row[0] is None:
+            return None
+        now = time.time()
+        return float("inf") if now < row[0] else now - row[0]
 
     def thread_attempt_count(self, thread_id):
         row = self.db.execute("SELECT agent_attempts FROM thread_sessions WHERE thread_id=?", (thread_id,)).fetchone()
@@ -100,7 +116,7 @@ class BridgeStore:
             if row is None:
                 return False
             thread_id = json.loads(row[0])["thread_id"]
-            self.db.execute("UPDATE inbox SET state='pending',attempts=0,error=NULL WHERE seq=?", (seq,))
+            self.db.execute("UPDATE inbox SET state='pending',attempts=0,error=NULL,agent_started_at=NULL WHERE seq=?", (seq,))
             self.db.execute("UPDATE thread_sessions SET agent_attempts=reply_count WHERE thread_id=?", (thread_id,))
             return True
 
@@ -117,10 +133,23 @@ class BridgeStore:
 
     def mark_done(self, seq, *, replied_thread=None):
         with self._write_transaction():
+            incoming = self.db.execute("SELECT payload FROM inbox WHERE seq=?", (seq,)).fetchone()
+            outgoing = self.db.execute("SELECT payload FROM outbox WHERE inbound_seq=?", (seq,)).fetchone()
             self.db.execute("UPDATE inbox SET state='done',error=NULL WHERE seq=?", (seq,))
             self.db.execute("UPDATE outbox SET state='sent' WHERE inbound_seq=?", (seq,))
             if replied_thread is not None:
                 self.db.execute("INSERT INTO thread_sessions(thread_id,reply_count) VALUES(?,1) ON CONFLICT(thread_id) DO UPDATE SET reply_count=reply_count+1", (replied_thread,))
+            completed = (incoming is not None and json.loads(incoming[0]).get("complete", False)) or (
+                outgoing is not None and json.loads(outgoing[0]).get("complete", False)
+            )
+            if completed:
+                thread_id = json.loads(incoming[0])["thread_id"] if incoming is not None else replied_thread
+                if thread_id is not None:
+                    self.db.execute("INSERT INTO thread_sessions(thread_id,closed) VALUES(?,1) ON CONFLICT(thread_id) DO UPDATE SET closed=1", (thread_id,))
+
+    def thread_is_closed(self, thread_id):
+        row = self.db.execute("SELECT closed FROM thread_sessions WHERE thread_id=?", (thread_id,)).fetchone()
+        return bool(row and row[0])
 
     def thread_reply_count(self, thread_id):
         row = self.db.execute("SELECT reply_count FROM thread_sessions WHERE thread_id=?", (thread_id,)).fetchone()

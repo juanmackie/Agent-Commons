@@ -60,11 +60,15 @@ class RoomStore:
               reply_to INTEGER,
               hop INTEGER NOT NULL,
               text TEXT NOT NULL,
+              complete INTEGER NOT NULL DEFAULT 0,
               created_at INTEGER NOT NULL,
               UNIQUE(room_hash, client_msg_id)
             );
             CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_hash, seq);
         """)
+        message_columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
+        if "complete" not in message_columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN complete INTEGER NOT NULL DEFAULT 0")
 
     def close(self):
         with self._lock:
@@ -104,6 +108,10 @@ class RoomStore:
         return self.db.execute("SELECT 1 FROM rooms WHERE room_hash=? AND last_posted_at>?", (room_hash, now - self.idle_ttl_seconds)).fetchone() is not None
 
     def post(self, room_id: str, payload: dict) -> tuple[dict, bool]:
+        payload = dict(payload)
+        payload.setdefault("complete", False)
+        if not isinstance(payload["complete"], bool):
+            raise ValueError("complete must be a boolean")
         now = self.clock()
         room_hash = self._hash(room_id)
         with self._write_transaction():
@@ -120,8 +128,8 @@ class RoomStore:
             count = self.db.execute("SELECT COUNT(*) FROM messages WHERE room_hash=?", (room_hash,)).fetchone()[0]
             if count >= self.max_messages_per_room:
                 raise MessageCapacity
-            cursor = self.db.execute("""INSERT INTO messages(room_hash,client_msg_id,sender,recipient,thread_id,reply_to,hop,text,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?)""", (room_hash, payload["client_msg_id"], payload["sender"], payload["recipient"], payload["thread_id"], payload["reply_to"], payload["hop"], payload["text"], now))
+            cursor = self.db.execute("""INSERT INTO messages(room_hash,client_msg_id,sender,recipient,thread_id,reply_to,hop,text,complete,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""", (room_hash, payload["client_msg_id"], payload["sender"], payload["recipient"], payload["thread_id"], payload["reply_to"], payload["hop"], payload["text"], int(payload["complete"]), now))
             self.db.execute("UPDATE rooms SET last_posted_at=? WHERE room_hash=?", (now, room_hash))
             row = self.db.execute("SELECT * FROM messages WHERE seq=?", (cursor.lastrowid,)).fetchone()
             return self._message(row), True
@@ -138,4 +146,4 @@ class RoomStore:
 
     @staticmethod
     def _message(row) -> dict:
-        return {"seq": row["seq"], "client_msg_id": row["client_msg_id"], "sender": row["sender"], "recipient": row["recipient"], "thread_id": row["thread_id"], "reply_to": row["reply_to"], "hop": row["hop"], "text": row["text"], "created_at": datetime.datetime.fromtimestamp(row["created_at"], datetime.timezone.utc).isoformat().replace("+00:00", "Z")}
+        return {"seq": row["seq"], "client_msg_id": row["client_msg_id"], "sender": row["sender"], "recipient": row["recipient"], "thread_id": row["thread_id"], "reply_to": row["reply_to"], "hop": row["hop"], "text": row["text"], "complete": bool(row["complete"]), "created_at": datetime.datetime.fromtimestamp(row["created_at"], datetime.timezone.utc).isoformat().replace("+00:00", "Z")}

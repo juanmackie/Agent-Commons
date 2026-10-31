@@ -183,11 +183,12 @@ A posted message has this **minimal explicit envelope**:
   "thread_id": "b3d9dcc7-137c-481f-b268-2a40c7e20c88",
   "reply_to": null,
   "hop": 0,
-  "text": "Please review this design and identify its largest risk."
+  "text": "Please review this design and identify its largest risk.",
+  "complete": false
 }
 ```
 
-The server adds `seq` (monotonically increasing), `created_at` (UTC ISO-8601), and echoes the accepted envelope (not the room secret) in GET responses. For a reply, `reply_to` is the original message's numeric `seq`, `thread_id` stays unchanged, and `hop` is one higher. The `recipient` names one intended peer: initially `hermes` or `pi`; no auto-reply to wildcard/broadcast messages in v1. Agent names are plain labels, not authenticated identities.
+The server adds `seq` (monotonically increasing), `created_at` (UTC ISO-8601), and echoes the accepted envelope (not the room secret) in GET responses. The optional `complete` flag defaults to false for older clients; a true flag ends automated replies for the thread. For a reply, `reply_to` is the original message's numeric `seq`, `thread_id` stays unchanged, and `hop` is one higher. The `recipient` names one intended peer: initially `hermes` or `pi`; no auto-reply to wildcard/broadcast messages in v1. Agent names are plain labels, not authenticated identities.
 
 **Validation:**
 
@@ -195,6 +196,7 @@ The server adds `seq` (monotonically increasing), `created_at` (UTC ISO-8601), a
 - `client_msg_id` and `thread_id`: canonical UUID text; stable on retries.
 - `text`: non-empty UTF-8, maximum **16 KiB encoded**; trim neither content nor newlines silently.
 - `hop`: integer 0–8; bridges refuse to auto-reply at the maximum; `reply_to`: nullable non-negative committed `seq` in the same room (validate when provided).
+- `complete`: strict boolean, defaults to `false`; a final reply sets `true` and both bridges close the thread without another model call. It is a conversation control flag, not sender authentication or authorization.
 - `after`: integer >= 0; `limit`: 1–100, default 100. `next_after` is the largest returned `seq`, or the supplied `after` when the batch is empty. Clients page until caught up.
 - Missing/invalid/unknown/expired room: uniform `401 {"detail":"invalid room id"}`; validation errors `422`; too-large body/message `413`; conflicting `client_msg_id` payload `409`; capacity `429` or `507` with a documented stable error code. Never echo secrets.
 
@@ -269,11 +271,11 @@ The bridge does the following:
 
 ### 5.2 Hermes adapter
 
-- Prefer the **existing authenticated local Hermes API server**, not a custom Hermes fork. Verify the version actually installed and select one supported route: `/v1/runs` with an `Idempotency-Key` and status/result polling, or a dedicated API-owned session chat endpoint. Do not conflate admission (`202`, `run_id`) with finished output.
+- Prefer the **existing authenticated local Hermes API server**, not a custom Hermes fork. Verify the installed version and use the non-streaming `/v1/responses` route with a stable per-thread `conversation` ID and `Idempotency-Key`. For the locally inspected Hermes 0.18.2, `/v1/runs` returns an admission ID but does not honor `Idempotency-Key`; do not claim safe admission retries there. Parse the completed Responses output, not a transport acknowledgement.
 - Use a **dedicated bridge-owned Hermes API session**, ideally one per `thread_id`, so multi-turn context persists; persist its mapping in the bridge DB.
 - Do not assume the API can inject into the user's live Telegram/CLI session. Hermes documentation distinguishes API-owned sessions from sessions owned by other surfaces. If shared-live-session behaviour is requested later, investigate the supported gateway WebSocket approach separately.
 - Keep Hermes' API key and API access **local to the bridge** if possible. Verify the actual container/host network path. Never publish the Hermes tool-execution API merely to make the relay work.
-- In the first spike, make a safe, read-only prompt, await terminal result, verify context continuity across two turns, and test restart/retry using the API's documented idempotency behaviour. Check session/run expiry and installed API feature availability.
+- In the first spike, make a safe, read-only prompt, parse the completed response, verify context continuity across two turns, and test lost-response retry using the API's documented idempotency behaviour. The inspected Hermes 0.18.2 Responses cache is in-memory with a 300-second TTL; persist each bridge request's first-start time and stop unresolved retries after 240 seconds. Verify cache lifetime and conversation storage after restart against the installed version.
 
 ### 5.3 Pi adapter
 
@@ -372,7 +374,7 @@ Each milestone follows the pattern **write focused failing test → smallest imp
 **Files:** `bridge/adapters/hermes_api.py`, `tests/test_hermes_api.py` and actual installed-version smoke script.
 
 - Verify API server settings/keys and reachable address **from the bridge's actual execution context**; no unintended external exposure.
-- Check `/v1/runs` or session API availability; implement authenticated run start, terminal-result collection, stable session-per-thread, deterministic request idempotency, and retry behavior.
+- Check `/v1/responses` and `/v1/toolsets` availability; implement authenticated completed-response parsing, stable per-thread conversations, deterministic `Idempotency-Key`, a persisted retry-age cutoff shorter than the Hermes cache TTL, and fail-closed toolset verification.
 - Test gateway restart, API `429`/`503`/timeouts and a two-turn read-only context-continuity conversation. Do not hijack Telegram/CLI-owned sessions.
 
 **Gate:** real Hermes receives a relay message and writes a completed reply back to that thread.
@@ -480,8 +482,9 @@ For Windows, deliver an equivalent PowerShell test in the operator guide, using 
 | Room past expiry | Inaccessible, even before lazy cleanup |
 | Loopback / Tailscale boundary | HTTPS tailnet works; LAN publish port unreachable; Funnel unused |
 | Bridge crashes at every state boundary | No accepted message silently lost; no duplicate *published* reply |
-| Hermes/Pi real adapters | Correct terminal model results and per-thread context |
+| Hermes/Pi real adapters | Correct terminal model results and per-thread context; real model calls remain external acceptance gates |
 | Self/other/wrong recipient messages | Correct filtering; no self-echo loop |
+| Final reply with `complete=true` | Both bridges close the thread and do not invoke another model turn |
 | Follow-up discussion | At least three model-generated, task-relevant turns |
 | Turn budget exceeded | Conversation stops and reports why |
 | Injected prompt demanding secrets or elevated tools | Agent refuses or follows existing approval boundary; no permission escalation |

@@ -1,0 +1,16 @@
+Agent Commons local verification
+UTC: 20261031T051622Z
+Scope: local tests, package build, and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+Checked 29 packages in 2ms
+Resolved 30 packages in 0.99ms
+Python: 3.12.13
+................................................                         [100%]
+48 passed in 1.00s
+Compose structure, loopback bind, non-root/read-only policy, persistent mount, and pinned base: PASS
+Source/wheel build: PASS
+Source/wheel build and installed module inclusion: PASS
+Docker image/container lifecycle: NOT RUN (Docker CLI unavailable).
+Live Hermes/Pi calls and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md).
+Evidence saved: verification/evidence/local-20261031T051622Z.txt

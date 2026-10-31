@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 
 import pytest
 
@@ -26,6 +27,34 @@ def payload(**changes):
 def test_store_rejects_nonpositive_retention_and_capacity(options):
     with pytest.raises(ValueError):
         RoomStore(":memory:", **options)
+
+
+def test_legacy_message_table_migrates_completion_flag_without_losing_history(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    room = "A" * 43
+    room_hash = RoomStore._hash(room)
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+          CREATE TABLE rooms(room_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_posted_at INTEGER NOT NULL);
+          CREATE TABLE messages(
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, room_hash TEXT NOT NULL,
+            client_msg_id TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+            thread_id TEXT NOT NULL, reply_to INTEGER, hop INTEGER NOT NULL,
+            text TEXT NOT NULL, created_at INTEGER NOT NULL,
+            UNIQUE(room_hash, client_msg_id)
+          );
+        """)
+        db.execute("INSERT INTO rooms VALUES(?,?,?)", (room_hash, 100, 100))
+        db.execute("INSERT INTO messages VALUES(1,?,?,?,?,?,?,?,?,?)", (
+            room_hash, "cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c13", "hermes", "pi",
+            "b3d9dcc7-137c-481f-b268-2a40c7e20c88", None, 0, "legacy message", 100,
+        ))
+
+    store = RoomStore(path, clock=lambda: 101)
+    messages, _ = store.read(room, after=0, limit=100)
+    assert len(messages) == 1
+    assert messages[0]["text"] == "legacy message"
+    assert messages[0]["complete"] is False
 
 
 def test_room_capability_is_hashed_and_messages_survive_reopen(tmp_path):
