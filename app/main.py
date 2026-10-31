@@ -2,6 +2,7 @@
 
 import os
 import re
+import threading
 import uuid
 from pathlib import Path
 
@@ -64,16 +65,18 @@ def create_app(db_path: str | Path | None = None, *, store: RoomStore | None = N
     configured_path = db_path or os.getenv("ROOMS_DB", "/data/rooms.sqlite3")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
+    store_lock = threading.Lock()
 
     def get_store() -> RoomStore:
-        if app.state.store is None:
-            app.state.store = RoomStore(
-                configured_path,
-                idle_ttl_seconds=int(os.getenv("ROOM_IDLE_TTL_SECONDS", "604800")),
-                max_active_rooms=int(os.getenv("MAX_ACTIVE_ROOMS", "16")),
-                max_messages_per_room=int(os.getenv("MAX_MESSAGES_PER_ROOM", "1000")),
-            )
-        return app.state.store
+        with store_lock:
+            if app.state.store is None:
+                app.state.store = RoomStore(
+                    configured_path,
+                    idle_ttl_seconds=int(os.getenv("ROOM_IDLE_TTL_SECONDS", "604800")),
+                    max_active_rooms=int(os.getenv("MAX_ACTIVE_ROOMS", "16")),
+                    max_messages_per_room=int(os.getenv("MAX_MESSAGES_PER_ROOM", "1000")),
+                )
+            return app.state.store
 
     @app.middleware("http")
     async def enforce_body_limit(request: Request, call_next):

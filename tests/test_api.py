@@ -41,6 +41,22 @@ def test_two_clients_auth_pagination_replay_and_conflict(client):
         close()
 
 
+def test_concurrent_room_creation_initializes_one_store_and_keeps_capabilities_unique():
+    app = create_app(":memory:")
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            responses = await asyncio.gather(*(c.post("/v1/rooms") for _ in range(12)))
+        assert all(response.status_code == 201 for response in responses)
+        ids = [response.json()["room_id"] for response in responses]
+        assert len(set(ids)) == len(ids)
+        assert app.state.store.db.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == len(ids)
+    try:
+        asyncio.run(scenario())
+    finally:
+        if app.state.store:
+            app.state.store.close()
+
+
 def test_message_size_and_validation(client):
     app, run, close = client
     async def scenario():

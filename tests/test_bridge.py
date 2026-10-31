@@ -43,6 +43,15 @@ class FakeAgent:
         return AgentResult("answer")
 
 
+class FailingAgent:
+    def __init__(self):
+        self.calls = 0
+
+    def run(self, **kwargs):
+        self.calls += 1
+        raise TimeoutError("simulated agent timeout")
+
+
 def message(seq=1, sender="hermes", recipient="pi", hop=0):
     return {"seq": seq, "client_msg_id": str(seq), "sender": sender, "recipient": recipient,
             "thread_id":"b3d9dcc7-137c-481f-b268-2a40c7e20c88", "reply_to":None,
@@ -109,6 +118,59 @@ def test_restart_retries_persisted_outbox_without_duplicate_post(tmp_path):
     assert restarted_store.pending() is None
 
 
+def test_poll_response_loss_does_not_advance_cursor_or_drop_message():
+    relay = FakeRelay([message()])
+    state = BridgeStore(":memory:")
+    worker = BridgeWorker(relay, state, FakeAgent(), agent_id="pi")
+    original_read = relay.read
+    attempts = 0
+
+    def lose_first_response(after, limit):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("simulated lost poll response")
+        return original_read(after, limit)
+
+    relay.read = lose_first_response
+    with pytest.raises(TimeoutError):
+        worker.poll_once()
+    assert state.cursor == 0
+    assert state.pending() is None
+
+    assert worker.poll_once() == 1
+    assert state.cursor == 1
+    assert state.pending()[0] == 1
+
+
+def test_restart_posts_saved_reply_after_crash_before_first_post(tmp_path):
+    relay = FakeRelay([message()])
+    path = tmp_path / "bridge.sqlite3"
+    first_store = BridgeStore(path)
+    first_agent = FakeAgent()
+    first_worker = BridgeWorker(relay, first_store, first_agent, agent_id="pi")
+    first_worker.poll_once()
+    original_post = relay.post
+    relay.post = lambda payload: (_ for _ in ()).throw(SystemExit("simulated process crash before POST"))
+
+    with pytest.raises(SystemExit):
+        first_worker.work_once()
+    saved = first_store.pending()[2]
+    assert saved is not None
+    assert relay.posts == []
+    assert first_agent.calls == 1
+    first_store.db.close()
+
+    relay.post = original_post
+    restarted_store = BridgeStore(path)
+    restarted_agent = FakeAgent()
+    restarted = BridgeWorker(relay, restarted_store, restarted_agent, agent_id="pi")
+    assert restarted.work_once()
+    assert relay.posts == [saved]
+    assert restarted_agent.calls == 0
+    assert restarted_store.pending() is None
+
+
 def test_two_fake_agents_complete_bounded_multi_turn_exchange():
     relay = FakeRelay([message()])
     hermes_store = BridgeStore(":memory:")
@@ -128,6 +190,57 @@ def test_two_fake_agents_complete_bounded_multi_turn_exchange():
     assert len({item["client_msg_id"] for item in relay.messages}) == 9
     assert hermes_store.thread_reply_count(message()["thread_id"]) == 4
     assert pi_store.thread_reply_count(message()["thread_id"]) == 4
+
+
+def test_agent_failures_exhaust_thread_budget_and_require_explicit_retry():
+    relay = FakeRelay([message()])
+    state = BridgeStore(":memory:")
+    failing = FailingAgent()
+    worker = BridgeWorker(relay, state, failing, agent_id="pi", max_auto_replies_per_thread=2)
+    worker.poll_once()
+
+    for _ in range(2):
+        with pytest.raises(TimeoutError):
+            worker.work_once()
+    assert worker.work_once() is True
+    assert failing.calls == 2
+    assert state.pending() is None
+    status = state.status()
+    assert status["pending_count"] == 0
+    assert status["failed_count"] == 1
+    assert status["recent_errors"][0]["error_category"].startswith("thread_budget_exhausted:TimeoutError")
+    assert state.thread_reply_count(message()["thread_id"]) == 0
+    assert state.thread_attempt_count(message()["thread_id"]) == 2
+
+    assert state.retry_failed(1)
+    recovered = BridgeWorker(relay, state, FakeAgent(), agent_id="pi", max_auto_replies_per_thread=2)
+    assert recovered.work_once()
+    assert state.pending() is None
+    assert state.thread_attempt_count(message()["thread_id"]) == 1
+    assert state.thread_reply_count(message()["thread_id"]) == 1
+
+
+def test_operator_retry_preserves_successful_thread_reply_budget():
+    state = BridgeStore(":memory:")
+    thread_id = message()["thread_id"]
+    state.mark_done(99, replied_thread=thread_id)
+    state.ingest([message()], 1)
+    state.mark_failed(1, "thread_budget_exhausted")
+
+    assert state.retry_failed(1)
+    assert state.thread_reply_count(thread_id) == 1
+    assert state.thread_attempt_count(thread_id) == 1
+
+
+def test_bridge_store_migrates_existing_thread_sessions_without_losing_data(tmp_path):
+    path = tmp_path / "legacy-bridge.sqlite3"
+    import sqlite3
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE thread_sessions(thread_id TEXT PRIMARY KEY, session_ref TEXT, reply_count INTEGER NOT NULL DEFAULT 0)")
+        db.execute("INSERT INTO thread_sessions VALUES(?,?,?)", ("thread-1", "session-1", 3))
+    migrated = BridgeStore(path)
+    row = migrated.db.execute("SELECT session_ref,reply_count,agent_attempts FROM thread_sessions WHERE thread_id='thread-1'").fetchone()
+    assert tuple(row) == ("session-1", 3, 0)
 
 
 def test_store_recovers_cursor_and_pending_inbox_after_restart(tmp_path):

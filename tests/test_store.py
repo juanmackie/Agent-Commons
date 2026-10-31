@@ -18,6 +18,16 @@ def payload(**changes):
     return value | changes
 
 
+@pytest.mark.parametrize(("options",), [
+    ({"idle_ttl_seconds": 0},),
+    ({"max_active_rooms": 0},),
+    ({"max_messages_per_room": -1},),
+])
+def test_store_rejects_nonpositive_retention_and_capacity(options):
+    with pytest.raises(ValueError):
+        RoomStore(":memory:", **options)
+
+
 def test_room_capability_is_hashed_and_messages_survive_reopen(tmp_path):
     db = tmp_path / "rooms.sqlite3"
     store = RoomStore(db, clock=lambda: 100)

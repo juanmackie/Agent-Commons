@@ -21,8 +21,11 @@ class BridgeStore:
           INSERT OR IGNORE INTO state VALUES('cursor', 0);
           CREATE TABLE IF NOT EXISTS inbox(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error TEXT);
           CREATE TABLE IF NOT EXISTS outbox(inbound_seq INTEGER PRIMARY KEY REFERENCES inbox(seq), payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending');
-          CREATE TABLE IF NOT EXISTS thread_sessions(thread_id TEXT PRIMARY KEY, session_ref TEXT, reply_count INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE IF NOT EXISTS thread_sessions(thread_id TEXT PRIMARY KEY, session_ref TEXT, reply_count INTEGER NOT NULL DEFAULT 0, agent_attempts INTEGER NOT NULL DEFAULT 0);
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(thread_sessions)")}
+        if "agent_attempts" not in columns:
+            self.db.execute("ALTER TABLE thread_sessions ADD COLUMN agent_attempts INTEGER NOT NULL DEFAULT 0")
 
     @contextlib.contextmanager
     def _write_transaction(self):
@@ -59,7 +62,8 @@ class BridgeStore:
         return {
             "cursor": self.cursor,
             "pending_count": self.db.execute("SELECT COUNT(*) FROM inbox WHERE state IN ('pending','publishing')").fetchone()[0],
-            "recent_errors": [{"seq": row[0], "attempts": row[1], "error_category": row[2]} for row in self.db.execute("SELECT seq,attempts,error FROM inbox WHERE error IS NOT NULL ORDER BY seq DESC LIMIT 20")],
+            "failed_count": self.db.execute("SELECT COUNT(*) FROM inbox WHERE state='failed'").fetchone()[0],
+            "recent_errors": [{"seq": row[0], "attempts": row[1], "error_category": row[2], "state": row[3]} for row in self.db.execute("SELECT seq,attempts,error,state FROM inbox WHERE error IS NOT NULL ORDER BY seq DESC LIMIT 20")],
         }
 
     def pending(self):
@@ -68,8 +72,37 @@ class BridgeStore:
             return None
         return row["seq"], json.loads(row["payload"]), json.loads(row["outgoing"]) if row["outgoing"] else None
 
-    def attempt(self, seq):
-        self.db.execute("UPDATE inbox SET attempts=attempts+1 WHERE seq=?", (seq,))
+    def begin_agent_attempt(self, seq, thread_id, max_per_thread):
+        """Atomically claim one bounded agent invocation for an inbox item and thread."""
+        with self._write_transaction():
+            self.db.execute("INSERT OR IGNORE INTO thread_sessions(thread_id) VALUES(?)", (thread_id,))
+            row = self.db.execute("SELECT agent_attempts,reply_count FROM thread_sessions WHERE thread_id=?", (thread_id,)).fetchone()
+            if row[0] >= max_per_thread or row[1] >= max_per_thread:
+                return False
+            updated = self.db.execute("UPDATE inbox SET attempts=attempts+1 WHERE seq=? AND state='pending'", (seq,)).rowcount
+            if not updated:
+                return False
+            self.db.execute("UPDATE thread_sessions SET agent_attempts=agent_attempts+1 WHERE thread_id=?", (thread_id,))
+            return True
+
+    def thread_attempt_count(self, thread_id):
+        row = self.db.execute("SELECT agent_attempts FROM thread_sessions WHERE thread_id=?", (thread_id,)).fetchone()
+        return 0 if row is None else row[0]
+
+    def mark_failed(self, seq, error_category):
+        with self._write_transaction():
+            self.db.execute("UPDATE inbox SET state='failed',error=CASE WHEN error IS NULL THEN ? ELSE ? || ':' || SUBSTR(error,1,90) END WHERE seq=? AND state IN ('pending','publishing')", (error_category[:100], error_category[:100], seq))
+
+    def retry_failed(self, seq):
+        """Explicit operator retry resets this message and its thread's call budget."""
+        with self._write_transaction():
+            row = self.db.execute("SELECT payload FROM inbox WHERE seq=? AND state='failed'", (seq,)).fetchone()
+            if row is None:
+                return False
+            thread_id = json.loads(row[0])["thread_id"]
+            self.db.execute("UPDATE inbox SET state='pending',attempts=0,error=NULL WHERE seq=?", (seq,))
+            self.db.execute("UPDATE thread_sessions SET agent_attempts=reply_count WHERE thread_id=?", (thread_id,))
+            return True
 
     def defer(self, seq, error):
         self.db.execute("UPDATE inbox SET state='pending',error=? WHERE seq=?", (error[:200], seq))

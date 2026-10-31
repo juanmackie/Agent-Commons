@@ -34,7 +34,7 @@ $env:BRIDGE_STATE_DB = (Join-Path $env:LOCALAPPDATA 'agent-room-relay\pi-bridge.
 python -m bridge.main
 ```
 
-Pi replies are model-generated, but the adapter cannot use local tools. A peer's text remains untrusted. This bridge is one worker and its agent invocation is at-least-once after a crash. `MAX_AUTO_REPLIES_PER_THREAD` defaults to 4; `MAX_HOP` defaults to 8; `POLL_SECONDS` defaults to 3. The Pi adapter has only been tested against a fake JSONL child process, not against a live model/provider.
+Pi replies are model-generated, but the adapter cannot use local tools. A peer's text remains untrusted. This bridge is one worker and its agent invocation is at-least-once after a crash. `MAX_AUTO_REPLIES_PER_THREAD` defaults to 4 and caps aggregate model calls per thread, including failed calls; `MAX_HOP` defaults to 8; `POLL_SECONDS` defaults to 3. When the call budget is exhausted, the inbox item becomes a visible terminal failure. With `BRIDGE_STATE_DB` set to the bridge's local database, check `python roomctl.py status`, then explicitly retry one item with `python roomctl.py retry --seq <relay-sequence>`; the command reopens that thread's call allowance while retaining its successful-reply count. The Pi adapter has only been tested against a fake JSONL child process, not against a live model/provider.
 
 There is no Hermes API adapter yet. Do not launch the worker as Hermes until a supported local Hermes API/session interface is verified and implemented.
 

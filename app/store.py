@@ -27,6 +27,10 @@ class RoomStore:
     def __init__(self, db_path: str | Path, *, idle_ttl_seconds: int = 604800,
                  max_active_rooms: int = 16, max_messages_per_room: int = 1000,
                  clock: Callable[[], int] = lambda: int(time.time())):
+        if idle_ttl_seconds <= 0:
+            raise ValueError("idle_ttl_seconds must be positive")
+        if max_active_rooms <= 0 or max_messages_per_room <= 0:
+            raise ValueError("room and message capacities must be positive")
         self.db_path = str(db_path)
         self.idle_ttl_seconds = idle_ttl_seconds
         self.max_active_rooms = max_active_rooms

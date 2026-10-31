@@ -16,7 +16,12 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_opener = urllib.request.build_opener(_NoRedirectHandler)
+class _NoProxyHandler(urllib.request.ProxyHandler):
+    def __init__(self):
+        super().__init__({})
+
+
+_opener = urllib.request.build_opener(_NoProxyHandler, _NoRedirectHandler)
 
 
 def validate_api_url(base_url: str) -> str:

@@ -69,9 +69,25 @@ def main(argv=None):
     send.add_argument("--text", required=True)
     read = commands.add_parser("read")
     read.add_argument("--after", type=int, default=0)
+    retry = commands.add_parser("retry", help="retry one terminally failed local bridge message")
+    retry.add_argument("--seq", type=int, required=True)
     commands.add_parser("status")
     args = parser.parse_args(argv)
     try:
+        if args.command == "retry":
+            if args.seq <= 0:
+                raise ValueError("seq must be positive")
+            bridge_path = os.getenv("BRIDGE_STATE_DB")
+            if not bridge_path:
+                raise RelayError("BRIDGE_STATE_DB is required for local retry")
+            bridge = BridgeStore(bridge_path)
+            try:
+                if not bridge.retry_failed(args.seq):
+                    raise RelayError(f"no failed bridge message with seq {args.seq}")
+            finally:
+                bridge.db.close()
+            print(json.dumps({"seq": args.seq, "status": "pending"}))
+            return 0
         if args.command == "create":
             ensure_config_replace_allowed(args.replace)
             api = validate_api_url(args.api)

@@ -1,10 +1,16 @@
+import urllib.request
+
 import pytest
 
-from bridge.client import RelayClient, _NoRedirectHandler
+from bridge.client import RelayClient, _NoProxyHandler, _NoRedirectHandler, _opener
 
 
-def test_client_does_not_follow_redirects_with_bearer_capability():
+def test_client_does_not_follow_redirects_or_ambient_proxies_with_bearer_capability(monkeypatch):
     assert _NoRedirectHandler().redirect_request(None, None, 302, "Found", {}, "https://other.example") is None
+    assert not any(isinstance(handler, urllib.request.ProxyHandler) for handler in _opener.handlers)
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"http": "http://proxy.invalid"})
+    constructed = urllib.request.build_opener(_NoProxyHandler, _NoRedirectHandler)
+    assert not any(isinstance(handler, urllib.request.ProxyHandler) for handler in constructed.handlers)
 
 
 def test_client_rejects_cleartext_remote_capability_transport():

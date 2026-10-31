@@ -1,6 +1,7 @@
 import json
 
 import roomctl
+from bridge.store import BridgeStore
 
 
 CAPABILITY = "x" * 43
@@ -15,6 +16,22 @@ def test_create_persists_capability_without_printing_it(tmp_path, monkeypatch, c
     assert roomctl.main(["create", "--api", "http://127.0.0.1:8080"]) == 0
     assert json.loads(config_path.read_text())["room_id"] == CAPABILITY
     assert CAPABILITY not in capsys.readouterr().out
+
+
+def test_retry_command_requeues_only_an_explicitly_failed_local_message(tmp_path, monkeypatch, capsys):
+    state_path = tmp_path / "bridge.sqlite3"
+    store = BridgeStore(state_path)
+    store.ingest([{"seq": 1, "thread_id": "thread-1", "sender": "hermes", "recipient": "pi", "hop": 0, "text": "task"}], 1)
+    store.mark_failed(1, "thread_budget_exhausted")
+    store.db.close()
+    monkeypatch.setenv("BRIDGE_STATE_DB", str(state_path))
+
+    assert roomctl.main(["retry", "--seq", "1"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"seq": 1, "status": "pending"}
+    reopened = BridgeStore(state_path)
+    assert reopened.status()["failed_count"] == 0
+    assert reopened.status()["pending_count"] == 1
+    reopened.db.close()
 
 
 def test_join_uses_explicit_url_and_validates_capability_before_saving(tmp_path, monkeypatch, capsys):
