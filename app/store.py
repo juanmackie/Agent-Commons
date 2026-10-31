@@ -108,12 +108,22 @@ class RoomStore:
         return self.db.execute("SELECT 1 FROM rooms WHERE room_hash=? AND last_posted_at>?", (room_hash, now - self.idle_ttl_seconds)).fetchone() is not None
 
     def post(self, room_id: str, payload: dict) -> tuple[dict, bool]:
+        return self._post_to_hash(self._hash(room_id), payload)
+
+    def post_to_room_ref(self, room_ref: str, payload: dict) -> tuple[dict, bool]:
+        cutoff = self.clock() - self.idle_ttl_seconds
+        with self._lock:
+            matches = self.db.execute("SELECT room_hash FROM rooms WHERE substr(room_hash,1,12)=? AND last_posted_at>? LIMIT 2", (room_ref, cutoff)).fetchall()
+        if len(matches) != 1:
+            raise KeyError
+        return self._post_to_hash(matches[0]["room_hash"], payload)
+
+    def _post_to_hash(self, room_hash: str, payload: dict) -> tuple[dict, bool]:
         payload = dict(payload)
         payload.setdefault("complete", False)
         if not isinstance(payload["complete"], bool):
             raise ValueError("complete must be a boolean")
         now = self.clock()
-        room_hash = self._hash(room_id)
         with self._write_transaction():
             if not self._room_exists(room_hash, now):
                 raise KeyError

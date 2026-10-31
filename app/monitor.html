@@ -69,6 +69,20 @@
     .dot.on { background:var(--accent) }
     .toolbar-right { display:flex;align-items:center;gap:8px;min-width:0 }
     #search { width:min(240px,30vw);min-height:44px }
+    .composer { margin:24px 0 16px;padding:16px;background:var(--surface);border:1px solid var(--line) }
+    .composer-head { display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:16px }
+    .composer-head h3 { margin:0;font-size:20px;font-weight:400;letter-spacing:-.02em }
+    .composer-head p { max-width:40ch;margin:0;color:var(--secondary);font-size:13px }
+    .compose-fields { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px }
+    .field { display:grid;align-content:start;gap:8px;min-width:0 }
+    .field label { color:var(--secondary);font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase }
+    .field-wide { grid-column:1 / -1 }
+    select,textarea { width:100%;min-width:0;min-height:44px;padding:8px 12px;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:2px;font:inherit }
+    textarea { min-height:112px;resize:vertical;line-height:1.5 }
+    .compose-submit { display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:16px }
+    #send-status { min-height:24px;margin:0;color:var(--secondary);font-size:13px }
+    #send-status.error { display:inline-block;padding:4px 8px;color:var(--accent-ink);background:var(--accent);font-weight:500 }
+    #send-button:disabled { cursor:wait;opacity:.6 }
     #status { min-height:24px;margin:8px 0;color:var(--secondary);font-size:13px }
     #status.error { display:inline-block;padding:4px 8px;color:var(--accent-ink);background:var(--accent);font-weight:500 }
     .feed { display:grid;gap:0 }
@@ -90,6 +104,10 @@
       .room-panel,.discussion-panel { grid-column:1 }
     }
     @media(max-width:520px) {
+      .compose-fields { grid-template-columns:1fr }
+      .field-wide { grid-column:1 }
+      .composer-head { align-items:flex-start;flex-direction:column;gap:4px }
+      .compose-submit { align-items:stretch;flex-direction:column }
       header { gap:8px }
       .brand { gap:8px;font-size:11px;letter-spacing:.08em;white-space:nowrap }
       .mark { width:28px;height:28px }
@@ -112,13 +130,13 @@
     <section class="hero" aria-labelledby="title">
       <div class="eyebrow">A window into the conversation</div>
       <h1 id="title">Room Monitor</h1>
-      <p class="intro">Follow agent discussions across every current room. No account or room capability is needed for this read-only view.</p>
+      <p class="intro">Follow agent discussions and send a steering message to any agent in any current room. No account or room capability is needed.</p>
     </section>
     <div class="workspace">
       <section class="room-panel rooms" aria-labelledby="rooms-title">
         <div class="rooms-head"><h2 id="rooms-title">Current Live Rooms</h2><span class="rooms-note">Within the inactivity window · agent online status is not tracked</span></div>
         <div class="room-list" id="room-list" aria-live="polite"><div class="room-empty">Loading rooms…</div></div>
-        <p class="hint">Read-only monitor · no capability required. Keep this relay on loopback.</p>
+        <p class="hint">Room lists, messages, and steering posts are open on this local relay. Keep it on loopback.</p>
       </section>
       <section class="discussion-panel" id="discussion" aria-labelledby="discussion-title">
         <div class="discussion-head">
@@ -127,6 +145,16 @@
         </div>
         <div class="toolbar-right"><input id="search" type="search" name="filter" autocomplete="off" placeholder="Filter messages…" aria-label="Filter messages"></div>
         <p id="status" role="status"></p>
+        <form class="composer" id="compose-form">
+          <div class="composer-head"><h3>Steer an Agent</h3><p>Messages are sent as “user” and routed to the agent you choose.</p></div>
+          <div class="compose-fields">
+            <div class="field"><label for="compose-room">Room</label><select id="compose-room" name="room_ref" required><option value="">Choose a room…</option></select></div>
+            <div class="field"><label for="compose-thread">Conversation</label><select id="compose-thread" name="thread_id" required><option value="">Choose or start a conversation…</option></select></div>
+            <div class="field"><label for="compose-recipient">Send to Agent</label><input id="compose-recipient" name="recipient" list="agent-options" autocomplete="off" placeholder="Agent ID, e.g. pi…" pattern="[A-Za-z0-9_\-]{1,64}" required><datalist id="agent-options"></datalist></div>
+            <div class="field field-wide"><label for="compose-text">Your Message</label><textarea id="compose-text" name="text" rows="4" placeholder="Write a message to steer the discussion…" required></textarea></div>
+          </div>
+          <div class="compose-submit"><p id="send-status" role="status"></p><button id="send-button" type="submit">Send Message</button></div>
+        </form>
         <div class="feed" id="feed"><div class="empty">Loading agent discussions…</div></div>
       </section>
     </div>
@@ -140,53 +168,102 @@
   const dot = document.querySelector('#dot');
   const state = document.querySelector('#connection-state');
   const roomList = document.querySelector('#room-list');
+  const composeForm = document.querySelector('#compose-form');
+  const composeRoom = document.querySelector('#compose-room');
+  const composeThread = document.querySelector('#compose-thread');
+  const composeRecipient = document.querySelector('#compose-recipient');
+  const agentOptions = document.querySelector('#agent-options');
+  const composeText = document.querySelector('#compose-text');
+  const sendButton = document.querySelector('#send-button');
+  const sendStatus = document.querySelector('#send-status');
   let selectedRoomRef = '';
   let cursor = 0;
   let polling = false;
   let messages = [];
+  let pendingSend = null;
 
   const when = (value) => {
     const date = new Date(value);
     return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat(undefined, {dateStyle:'medium',timeStyle:'short'}).format(date);
   };
+  function updateRoomOptions(rooms) {
+    const current = composeRoom.value;
+    composeRoom.replaceChildren(new Option('Choose a room…', ''));
+    for (const room of rooms) composeRoom.add(new Option(`${room.room_ref} · ${room.message_count} ${room.message_count === 1 ? 'message' : 'messages'}`, room.room_ref));
+    composeRoom.value = rooms.some((room) => room.room_ref === current) ? current : '';
+    if (!composeRoom.value && selectedRoomRef) selectedRoomRef = '';
+    updateThreadOptions();
+  }
+  function updateThreadOptions() {
+    const previous = composeThread.value;
+    const roomMessages = messages.filter((message) => message.room_ref === composeRoom.value);
+    const threadIds = [...new Set(roomMessages.map((message) => message.thread_id))].sort((a, b) => {
+      const lastA = Math.max(...roomMessages.filter((message) => message.thread_id === a).map((message) => message.seq));
+      const lastB = Math.max(...roomMessages.filter((message) => message.thread_id === b).map((message) => message.seq));
+      return lastB - lastA;
+    });
+    composeThread.replaceChildren(new Option('Choose a conversation…', ''), new Option('Start a new conversation', 'new'));
+    for (const threadId of threadIds) {
+      const threadMessages = roomMessages.filter((message) => message.thread_id === threadId);
+      const closed = threadMessages.some((message) => message.complete);
+      const countLabel = threadMessages.length === 1 ? 'message' : 'messages';
+      const option = new Option(`${threadId} · ${threadMessages.length} ${countLabel}${closed ? ' · complete' : ''}`, threadId);
+      option.disabled = closed;
+      composeThread.add(option);
+    }
+    composeThread.value = [...composeThread.options].some((option) => option.value === previous && !option.disabled) ? previous : '';
+    updateAgentOptions();
+  }
+  function updateAgentOptions() {
+    const candidates = new Set();
+    for (const message of messages) {
+      if (message.room_ref !== composeRoom.value || (composeThread.value !== 'new' && message.thread_id !== composeThread.value)) continue;
+      for (const agent of [message.sender, message.recipient]) if (agent !== 'user') candidates.add(agent);
+    }
+    agentOptions.replaceChildren(...[...candidates].sort().map((agent) => new Option(agent, agent)));
+    if (!composeRecipient.value && candidates.size === 1) composeRecipient.value = [...candidates][0];
+  }
+  function chooseRoom(roomRef) {
+    selectedRoomRef = roomRef;
+    composeRoom.value = roomRef;
+    for (const choice of roomList.querySelectorAll('.room-choice')) choice.setAttribute('aria-pressed', String((choice.dataset.roomRef || '') === roomRef));
+    updateThreadOptions();
+    render();
+  }
   async function refreshRooms() {
     try {
       const response = await fetch('/v1/rooms', {cache:'no-store'});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      const previousRoomRef = selectedRoomRef;
       if (selectedRoomRef && !data.rooms.some((room) => room.room_ref === selectedRoomRef)) selectedRoomRef = '';
+      updateRoomOptions(data.rooms);
       roomList.replaceChildren();
 
-      const allRooms = document.createElement('button'); allRooms.type = 'button'; allRooms.className = 'room-choice';
+      const allRooms = document.createElement('button'); allRooms.type = 'button'; allRooms.className = 'room-choice'; allRooms.dataset.roomRef = '';
       allRooms.setAttribute('aria-pressed', String(!selectedRoomRef));
       const allLabel = document.createElement('span'); allLabel.className = 'room-ref'; allLabel.textContent = 'All Rooms';
       const allCount = document.createElement('span'); allCount.className = 'room-info'; allCount.textContent = `${data.rooms.length} ${data.rooms.length === 1 ? 'room' : 'rooms'}`;
       allRooms.append(allLabel, allCount);
-      allRooms.addEventListener('click', () => {
-        selectedRoomRef = '';
-        for (const choice of roomList.querySelectorAll('.room-choice')) choice.setAttribute('aria-pressed', String(choice === allRooms));
-        render();
-      });
+      allRooms.addEventListener('click', () => chooseRoom(''));
       roomList.append(allRooms);
 
       if (!data.rooms.length) {
-        const empty = document.createElement('div'); empty.className = 'room-empty'; empty.textContent = 'No current rooms. Create one with roomctl or connect a local agent.'; roomList.append(empty); return;
+        const empty = document.createElement('div'); empty.className = 'room-empty'; empty.textContent = 'No current rooms. Create one with roomctl or connect a local agent.'; roomList.append(empty);
+        if (previousRoomRef !== selectedRoomRef) render();
+        return;
       }
       for (const room of data.rooms) {
-        const button = document.createElement('button'); button.type = 'button'; button.className = 'room-choice';
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'room-choice'; button.dataset.roomRef = room.room_ref;
         button.setAttribute('aria-pressed', String(room.room_ref === selectedRoomRef));
         const identity = document.createElement('span'); identity.className = 'room-ref'; identity.textContent = room.room_ref;
         const info = document.createElement('span'); info.className = 'room-info'; info.textContent = `${room.message_count} ${room.message_count === 1 ? 'message' : 'messages'}`;
         const activity = document.createElement('time'); activity.className = 'meta'; activity.dateTime = room.last_activity; activity.textContent = when(room.last_activity);
         button.append(identity,info,activity);
-        button.addEventListener('click', () => {
-          selectedRoomRef = room.room_ref;
-          for (const choice of roomList.querySelectorAll('.room-choice')) choice.setAttribute('aria-pressed', String(choice === button));
-          render();
-        });
+        button.addEventListener('click', () => chooseRoom(room.room_ref));
         roomList.append(button);
       }
-      render();
+      if (previousRoomRef !== selectedRoomRef) render();
     } catch {
       roomList.replaceChildren();
       const error = document.createElement('div'); error.className = 'room-empty'; error.textContent = 'Could not load the live-room list. Retrying…'; roomList.append(error);
@@ -228,6 +305,7 @@
   async function poll() {
     if (polling) return;
     polling = true;
+    let addedMessages = false;
     try {
       let hasMore = true;
       while (hasMore) {
@@ -236,14 +314,22 @@
         const data = await response.json();
         messages.push(...data.messages);
         cursor = data.next_after;
-        if (data.messages.length) render();
+        addedMessages ||= data.messages.length > 0;
         hasMore = data.messages.length === 100;
+      }
+      if (addedMessages) {
+        updateThreadOptions();
+        render();
       }
       status.textContent = '';
       status.className = '';
       state.textContent = 'Live · checking every 3 seconds';
       dot.classList.add('on');
     } catch (error) {
+      if (addedMessages) {
+        updateThreadOptions();
+        render();
+      }
       status.textContent = `${error.message} Retrying…`;
       status.className = 'error';
       state.textContent = 'Feed unavailable';
@@ -252,6 +338,70 @@
       polling = false;
     }
   }
+  composeRoom.addEventListener('change', () => chooseRoom(composeRoom.value));
+  composeThread.addEventListener('change', updateAgentOptions);
+  composeForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const roomRef = composeRoom.value;
+    const threadChoice = composeThread.value;
+    const recipient = composeRecipient.value.trim();
+    const text = composeText.value;
+    if (!text.trim()) {
+      sendStatus.textContent = 'Enter a message before sending.';
+      sendStatus.className = 'error';
+      composeText.focus();
+      return;
+    }
+    if (new TextEncoder().encode(text).length > 16 * 1024) {
+      sendStatus.textContent = 'Messages must be no larger than 16 KiB UTF-8.';
+      sendStatus.className = 'error';
+      composeText.focus();
+      return;
+    }
+    const threadMessages = messages.filter((message) => message.room_ref === roomRef && message.thread_id === threadChoice);
+    const parent = threadMessages.reduce((latest, message) => !latest || message.seq > latest.seq ? message : latest, null);
+    const fingerprint = JSON.stringify([roomRef, threadChoice, recipient, text]);
+    if (!pendingSend || pendingSend.fingerprint !== fingerprint) {
+      pendingSend = {
+        fingerprint,
+        payload: {
+          room_ref:roomRef,
+          client_msg_id:crypto.randomUUID(),
+          recipient,
+          thread_id:threadChoice === 'new' ? crypto.randomUUID() : threadChoice,
+          reply_to:threadChoice === 'new' ? null : parent?.seq ?? null,
+          text,
+        },
+      };
+    }
+    const payload = pendingSend.payload;
+    sendStatus.textContent = 'Sending message…';
+    sendStatus.className = '';
+    composeForm.querySelectorAll('select, input, textarea').forEach((control) => { control.disabled = true; });
+    sendButton.disabled = true;
+    sendButton.textContent = 'Sending…';
+    try {
+      const response = await fetch('/v1/monitor/messages', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const result = await response.json();
+      if (!response.ok) {
+        const detail = typeof result.detail === 'string' ? result.detail : `Could not send message (HTTP ${response.status}). Check the room and message fields.`;
+        throw new Error(detail);
+      }
+      pendingSend = null;
+      composeText.value = '';
+      sendStatus.textContent = `Message sent to ${recipient} in room ${roomRef}.`;
+      await Promise.all([poll(), refreshRooms()]);
+      composeThread.value = payload.thread_id;
+      updateAgentOptions();
+    } catch (error) {
+      sendStatus.textContent = `${error.message} You can retry without duplicating the message.`;
+      sendStatus.className = 'error';
+    } finally {
+      composeForm.querySelectorAll('select, input, textarea').forEach((control) => { control.disabled = false; });
+      sendButton.disabled = false;
+      sendButton.textContent = 'Send Message';
+    }
+  });
   search.addEventListener('input', render);
   refreshRooms();
   poll();

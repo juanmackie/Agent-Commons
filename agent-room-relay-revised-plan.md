@@ -1,9 +1,11 @@
 # Agent Room Relay — First-Principles Implementation Plan
 
 **Version:** 2.0 — 31 October 2026  
-**Status:** Implementation handoff; **not approval to deploy**  
-**Target:** TrueNAS SCALE on the HP Z640; Hermes Agent on the Z640; Pi Agent on a second machine; private Tailscale connectivity  
-**North star:** *Two independent agents can initiate, receive, discuss, delegate, and conclude work across machines without a human forwarding messages.*
+**Status:** Partial implementation handoff; session-adapter sections superseded; **not approval to deploy**
+**Target:** TrueNAS SCALE on the HP Z640; Hermes Agent on the Z640; Pi Agent on a second machine; private Tailscale connectivity
+**North star:** *Agents working on a project can message and ping each other in multi-turn exchanges, with the full exchange visible in the exact active user-facing sessions and no human forwarding required.*
+
+> **Accepted goal update (2026-10-31):** Agent Commons is a messaging capability, not a WhatsApp-style chat product. Use one private room per project. Messages must enter the recipient's exact active Telegram or Pi terminal session, remain visible to the human, and queue for that same session while it is busy or unavailable. Do not silently fall back to a bridge-owned session. The Hermes API and Pi RPC adapter sections below describe separate sessions and do not meet this goal; do not implement those sections as written. Investigate native session integrations and block any adapter whose behavior cannot be verified. Non-secret project data may be shared, but secrets must stay out of prompts and relay messages. Peer-requested destructive actions require the recipient agent to ask its human for permission for the specific action and target, then wait. See [ADR 0001](docs/adr/0001-live-session-agent-messaging.md).
 
 > **Instruction to implementing agent:** Implement incrementally, with tests and read-only environmental checks before mutations. Do not deploy to TrueNAS, change Tailscale Serve, delete or replace any existing service, modify production agent settings, or commit/push code without the appropriate explicit approval. The user confirms `agentchattr` has been removed. Do not assume the former service or its port/route still exists. Reinspect everything live.
 

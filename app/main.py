@@ -1,4 +1,4 @@
-"""HTTP API for the private room mailbox."""
+"""HTTP API for the local room relay and browser monitor."""
 
 import os
 import re
@@ -15,6 +15,7 @@ from app.store import Conflict, MessageCapacity, RoomCapacity, RoomStore
 
 MAX_TEXT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 100 * 1024
+_MAX_SQLITE_INTEGER = (1 << 63) - 1
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -25,7 +26,7 @@ class MessageInput(BaseModel):
     sender: StrictStr
     recipient: StrictStr
     thread_id: StrictStr
-    reply_to: StrictInt | None
+    reply_to: StrictInt | None = Field(ge=0, le=_MAX_SQLITE_INTEGER)
     hop: StrictInt = Field(ge=0, le=8)
     text: StrictStr
     complete: StrictBool = False
@@ -43,6 +44,59 @@ class MessageInput(BaseModel):
     @field_validator("sender", "recipient")
     @classmethod
     def valid_label(cls, value):
+        if not _LABEL.fullmatch(value):
+            raise ValueError("must contain 1-64 letters, digits, underscores, or hyphens")
+        return value
+
+    @field_validator("reply_to")
+    @classmethod
+    def valid_reply_to(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("must be a non-negative sequence")
+        return value
+
+    @field_validator("text")
+    @classmethod
+    def valid_text(cls, value):
+        if not value:
+            raise ValueError("must not be empty")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("must be valid UTF-8 text") from None
+        return value
+
+
+class MonitorMessageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    room_ref: StrictStr
+    client_msg_id: StrictStr
+    recipient: StrictStr
+    thread_id: StrictStr
+    reply_to: StrictInt | None = Field(default=None, ge=0, le=_MAX_SQLITE_INTEGER)
+    text: StrictStr
+
+    @field_validator("room_ref")
+    @classmethod
+    def valid_room_ref(cls, value):
+        if not re.fullmatch(r"[0-9a-f]{12}", value):
+            raise ValueError("must be a 12-character room reference")
+        return value
+
+    @field_validator("client_msg_id", "thread_id")
+    @classmethod
+    def canonical_uuid(cls, value):
+        try:
+            if str(uuid.UUID(value)) != value:
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise ValueError("must be canonical UUID text") from None
+        return value
+
+    @field_validator("recipient")
+    @classmethod
+    def valid_recipient(cls, value):
         if not _LABEL.fullmatch(value):
             raise ValueError("must contain 1-64 letters, digits, underscores, or hyphens")
         return value
@@ -85,7 +139,7 @@ def create_app(db_path: str | Path | None = None, *, store: RoomStore | None = N
 
     @app.middleware("http")
     async def enforce_body_limit(request: Request, call_next):
-        if request.method == "POST" and request.url.path in {"/v1/rooms", "/v1/messages"}:
+        if request.method == "POST" and request.url.path in {"/v1/rooms", "/v1/messages", "/v1/monitor/messages"}:
             length = request.headers.get("content-length")
             if length is not None:
                 try:
@@ -136,6 +190,32 @@ def create_app(db_path: str | Path | None = None, *, store: RoomStore | None = N
     def monitor_messages(after: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100)):
         messages, next_after = get_store().read_active_messages(after=after, limit=limit)
         return JSONResponse({"messages": messages, "next_after": next_after}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/monitor/messages")
+    def post_monitor_message(message: MonitorMessageInput):
+        if len(message.text.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise HTTPException(status_code=413, detail="text exceeds 16 KiB UTF-8 limit")
+        payload = {
+            "client_msg_id": message.client_msg_id,
+            "sender": "user",
+            "recipient": message.recipient,
+            "thread_id": message.thread_id,
+            "reply_to": message.reply_to,
+            "hop": 0,
+            "text": message.text,
+            "complete": False,
+        }
+        try:
+            result, created = get_store().post_to_room_ref(message.room_ref, payload)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="room is no longer available") from None
+        except Conflict:
+            raise HTTPException(status_code=409, detail="client_msg_id payload conflict") from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        except MessageCapacity:
+            return JSONResponse({"detail": "message capacity reached", "code": "message_capacity"}, status_code=507)
+        return JSONResponse(result | {"room_ref": message.room_ref}, status_code=201 if created else 200, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/messages", status_code=201)
     def post_message(message: MessageInput, authorization: str | None = Header(default=None)):

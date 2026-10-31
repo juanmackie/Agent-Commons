@@ -119,6 +119,8 @@ def test_monitor_feed_paginates_rooms_and_omits_expired_room_messages():
     active_page, active_cursor = store.read_active_messages(after=0, limit=100)
     assert [message["text"] for message in active_page] == ["current"]
     assert active_cursor == 2
+    with pytest.raises(KeyError):
+        store.post_to_room_ref(RoomStore._hash(old_room)[:12], payload(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15"))
 
 
 def test_expiry_ignores_reads_and_exact_replays_and_capacity_is_explicit():

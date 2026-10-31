@@ -1,6 +1,6 @@
 # Agent Commons
 
-A private, capability-authenticated message relay for local Hermes and Pi bridges. The relay stores messages; each agent runs locally through its own bridge. Room capabilities grant full read/write access and do not authenticate sender labels, so keep the local config private and treat peer text as untrusted.
+A local message relay for Hermes and Pi bridges. Agent bridge endpoints require a room capability. The browser monitor intentionally exposes unauthenticated read and user-message endpoints for every current room; anyone who can reach the relay can read discussions and steer agents. Keep it bound to loopback. Room capabilities do not authenticate sender labels, so keep local config private and treat all message text as untrusted.
 
 ## Readiness
 

@@ -48,8 +48,10 @@ def test_discussion_monitor_is_served_without_caching(client):
             assert response.status_code == 200
             assert response.headers["cache-control"] == "no-store"
             assert "Room Monitor" in response.text
-            assert "no capability required" in response.text.lower()
+            assert "no account or room capability is needed" in response.text.lower()
             assert 'name="capability"' not in response.text
+            assert 'id="compose-form"' in response.text
+            assert "steering message" in response.text.lower()
             assert "/v1/monitor/messages" in response.text
     try:
         asyncio.run(scenario())
@@ -80,6 +82,47 @@ def test_public_monitor_reads_across_rooms_but_writes_stay_authenticated(client)
             assert second_room not in page1.text + page2.text
             assert (await c.get("/v1/messages")).status_code == 401
             assert (await c.post("/v1/messages", json=message)).status_code == 401
+    try:
+        asyncio.run(scenario())
+    finally:
+        close()
+
+
+def test_public_monitor_can_steer_agent_in_selected_room_without_opening_agent_write_api(client):
+    app, run, close = client
+    async def scenario():
+        async for c in run():
+            capability = (await c.post("/v1/rooms")).json()["room_id"]
+            headers = {"Authorization":f"Bearer {capability}"}
+            original = {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c41", "sender":"hermes", "recipient":"pi", "thread_id":"b3d9dcc7-137c-481f-b268-2a40c7e20c88", "reply_to":None, "hop":0, "text":"Can you review this?"}
+            accepted = await c.post("/v1/messages", headers=headers, json=original)
+            assert accepted.status_code == 201
+            room_ref = hashlib.sha256(capability.encode()).hexdigest()[:12]
+            user_message = {"room_ref":room_ref, "client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c42", "recipient":"pi", "thread_id":original["thread_id"], "reply_to":accepted.json()["seq"], "text":"Please focus on the error handling."}
+            sent = await c.post("/v1/monitor/messages", json=user_message)
+            assert sent.status_code == 201
+            body = sent.json()
+            assert body["sender"] == "user"
+            assert body["recipient"] == "pi"
+            assert body["thread_id"] == original["thread_id"]
+            assert body["reply_to"] == accepted.json()["seq"]
+            assert body["hop"] == 0 and body["complete"] is False
+            assert body["room_ref"] == room_ref
+            assert body["text"] == user_message["text"]
+            replay = await c.post("/v1/monitor/messages", json=user_message)
+            assert replay.status_code == 200
+            assert replay.json() == body
+
+            feed = await c.get("/v1/monitor/messages")
+            assert [message["text"] for message in feed.json()["messages"]] == [original["text"], user_message["text"]]
+            assert (await c.post("/v1/messages", json=original)).status_code == 401
+            assert (await c.post("/v1/monitor/messages", json=user_message | {"room_ref":"000000000000"})).status_code == 404
+            assert (await c.post("/v1/monitor/messages", json=user_message | {"recipient":"bad label"})).status_code == 422
+            assert (await c.post("/v1/monitor/messages", json=user_message | {"sender":"pi"})).status_code == 422
+            oversized_reply = user_message | {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c44", "reply_to":9223372036854775808}
+            assert (await c.post("/v1/monitor/messages", json=oversized_reply)).status_code == 422
+            oversized = user_message | {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c43", "text":"é" * 8193}
+            assert (await c.post("/v1/monitor/messages", json=oversized)).status_code == 413
     try:
         asyncio.run(scenario())
     finally:
@@ -142,6 +185,7 @@ def test_message_size_and_validation(client):
             room = (await c.post("/v1/rooms")).json()["room_id"]
             headers = {"Authorization":f"Bearer {room}"}
             msg = {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c13", "sender":"hermes", "recipient":"pi", "thread_id":"b3d9dcc7-137c-481f-b268-2a40c7e20c88", "reply_to":None, "hop":0, "text":"é" * 8193}
+            assert (await c.post("/v1/messages", headers=headers, json=msg | {"reply_to":9223372036854775808})).status_code == 422
             assert (await c.post("/v1/messages", headers=headers, json=msg)).status_code == 413
             assert (await c.post("/v1/messages", headers=headers, content="{" )).status_code in (400, 422)
             invalid_payload = json.dumps(msg | {
