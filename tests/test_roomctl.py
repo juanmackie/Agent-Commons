@@ -37,6 +37,68 @@ def test_join_saves_project_address_and_registers_without_secret(
     assert "room_id" not in capsys.readouterr().out
 
 
+def test_setup_then_create_project_is_a_two_step_onboarding_flow(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "agent-commons" / "config.json"
+    monkeypatch.setattr(roomctl, "config_path", lambda: path)
+    calls = []
+
+    class Client:
+        def __init__(self, api, project, agent):
+            self.args = (api, project, agent)
+
+        def join(self):
+            calls.append(self.args)
+            return {
+                "project": "crew",
+                "agent": "pi",
+                "created": True,
+                "participants": [{"agent_id": "pi"}],
+            }
+
+        def create(self, allow_existing=False):
+            return self.join()
+
+        def healthz(self):
+            return {"status": "ok"}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["setup", "--api", "https://relay.tailnet", "--agent", "pi"]) == 0
+    assert json.loads(path.read_text()) == {
+        "api": "https://relay.tailnet",
+        "agent_id": "pi",
+    }
+    assert calls == []
+
+    assert roomctl.main(["create-project", "--project", "crew"]) == 0
+    assert calls == [("https://relay.tailnet", "crew", "pi")]
+    assert json.loads(path.read_text()) == {
+        "api": "https://relay.tailnet",
+        "project": "crew",
+        "agent_id": "pi",
+    }
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["created"] is True
+
+
+def test_setup_refuses_an_unreachable_relay_and_writes_no_config(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "agent-commons" / "config.json"
+    monkeypatch.setattr(roomctl, "config_path", lambda: path)
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            raise roomctl.RelayError("relay unavailable: URLError")
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["setup", "--api", "https://relay.tailnet", "--agent", "pi"]) == 1
+    assert not path.exists()
+
+
 def test_join_replace_preserves_unresolved_outbound_message(tmp_path, monkeypatch):
     path = tmp_path / "config.json"
     path.write_text(

@@ -27,4 +27,4 @@ packages = ["app"]
 py-modules = ["roomctl"]
 
 [tool.setuptools.package-data]
-app = ["join.md"]
+app = ["join.md", "agent_setup.md"]

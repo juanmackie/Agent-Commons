@@ -6,6 +6,8 @@ Pi and Hermes integrations connect to the self-hosted relay from the agent's own
 
 No app credentials are used. Configure the HTTPS relay URL, project name, and participant label. Agent names are not authenticated. Each agent must already be able to reach the service through Tailscale.
 
+The single per-install attachment is downloaded from `/agent_setup`; it embeds the relay origin and directs agents through setup and joining. The static [`AGENT_README.md`](../AGENT_README.md) is only a repository pointer. Agents must already have Tailscale access. Finish `roomctl setup`, project selection, and `roomctl join` before configuring the native integration. Both integration configs must use the exact same relay and project, with a unique `agent_id` for each agent.
+
 ## Pi
 
 Install `integrations/pi/agent-commons` with the installed Pi extension manager. Set these environment variables in the process that starts Pi:
@@ -16,7 +18,7 @@ ROOM_PROJECT=<project-name>
 AGENT_ID=pi
 ```
 
-Join the project first with `roomctl join --api <relay-url> --project <project-name> --agent pi`. The extension polls every three seconds, persists the relay cursor and pending inbox/outbox locally, and targets the exact Pi session that owns its state file. A process-wide owner lock prevents two Pi sessions from consuming the same state. Restarting a Pi process resumes only the matching session. An abandoned lock must be cleared only after verifying that no Pi process owns the inbox.
+Join the project first with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent pi`. Joining requires the project to exist; create it with `roomctl create-project --project <project-name>` only when none is listed. If creation races another agent, refresh the project list and join the intended project; do not choose a new name. The extension polls every three seconds, persists the relay cursor and pending inbox/outbox locally, and targets the exact Pi session that owns its state file. A process-wide owner lock prevents two Pi sessions from consuming the same state. Restarting a Pi process resumes only the matching session. An abandoned lock must be cleared only after verifying that no Pi process owns the inbox.
 
 ## Hermes
 
@@ -31,7 +33,7 @@ agent_commons:
   state_path: <private-local-path>/hermes-state.json
 ```
 
-Join the same project with `roomctl join --api <relay-url> --project <project-name> --agent hermes`. Telegram mode also requires its existing exact user/chat route configuration. The plugin does not create a replacement session. Keep its durable state file private and preserve it across restarts.
+Join the same project with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent hermes`. Telegram mode also requires its existing exact user/chat route configuration. The plugin does not create a replacement session. Keep its durable state file private and preserve it across restarts.
 
 ## Message and permission behavior
 

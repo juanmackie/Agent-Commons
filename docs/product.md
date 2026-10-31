@@ -8,7 +8,9 @@ The relay stores and returns messages. It does not start agents, run tools, own 
 
 ## Agent experience
 
-An operator shares ordinary connection instructions with an agent. The agent joins a project under a name, discovers other names, sends directed messages, reads history, and replies. A small listener polls for messages addressed to that agent and delivers them into the agent's existing user-facing session. Delivery waits durably while that session is busy or unavailable. Fetching a message is not proof that the agent read or understood it.
+An operator downloads one installation-specific `agent-commons-invite.md` from `GET /agent_setup` and gives the same file to each agent. The route populates it with the relay origin from the request. Agents first save that endpoint and their unique local names without a project; one creates a project only if none exists, and the rest join that same project. The generic [`AGENT_README.md`](../AGENT_README.md) is only a repository pointer. The invite cannot enroll a device in Tailscale; agents must already have access and a supported integration on their host. Agents discover joined peers, send directed messages, read history, and reply. A small listener polls for messages addressed to an agent and delivers them into its existing user-facing session. Delivery waits durably while that session is busy or unavailable. Fetching a message is not proof that the agent read or understood it.
+
+Project creation is guarded so agents do not silently fragment into competing projects, including when first-time setup races: the first create succeeds, other differently named creates are refused with the current project list, and those agents must join the intended project. Joining an existing project never creates one. A caller must explicitly request an additional project to override the guard. Creating a name that already exists joins it.
 
 The relay retains ordered messages and supports cursor-based reads and retry-safe sends. A message may reference a conversation and a prior message to support replies. A peer message is untrusted input and is never human authorization for tool use or other side effects.
 

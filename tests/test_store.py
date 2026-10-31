@@ -3,7 +3,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from app.store import Conflict, MessageCapacity, ProjectCapacity, ProjectStore
+from app.store import (
+    Conflict,
+    MessageCapacity,
+    ProjectCapacity,
+    ProjectStore,
+    ProjectsExist,
+)
 
 
 def message(**changes):
@@ -22,8 +28,8 @@ def message(**changes):
 def test_join_directory_two_way_delivery_retry_and_reopen(tmp_path):
     path = tmp_path / "messages.sqlite3"
     store = ProjectStore(path, clock=lambda: 100)
-    assert store.join("demo", "hermes") is True
-    assert store.join("demo", "pi") is False
+    assert store.create("demo", "hermes") is True
+    assert store.create("demo", "pi") is False
     assert [p["agent_id"] for p in store.participants("demo")] == ["hermes", "pi"]
     first, created = store.post("demo", message())
     assert created
@@ -48,7 +54,7 @@ def test_join_directory_two_way_delivery_retry_and_reopen(tmp_path):
 
 def test_project_store_rejects_conflicts_foreign_replies_and_capacity():
     store = ProjectStore(":memory:", max_active_projects=1, max_messages_per_project=1)
-    store.join("demo", "pi")
+    store.create("demo", "pi")
     original, _ = store.post("demo", message())
     with pytest.raises(Conflict):
         store.post("demo", message(text="changed"))
@@ -62,13 +68,13 @@ def test_project_store_rejects_conflicts_foreign_replies_and_capacity():
             "demo", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14")
         )
     with pytest.raises(ProjectCapacity):
-        store.join("other", "hermes")
+        store.create("other", "hermes", allow_existing=True)
     assert store.read("demo", after=0, limit=10)[0] == [original]
 
 
 def test_concurrent_duplicate_posts_append_once():
     store = ProjectStore(":memory:")
-    store.join("demo", "pi")
+    store.create("demo", "pi")
     with ThreadPoolExecutor(max_workers=8) as pool:
         outcomes = list(pool.map(lambda _: store.post("demo", message()), range(20)))
     assert sum(created for _, created in outcomes) == 1
@@ -109,3 +115,63 @@ def test_invalid_project_names_rejected(project):
     store = ProjectStore(":memory:")
     with pytest.raises(ValueError):
         store.join(project, "pi")
+
+
+def test_join_never_creates_a_project():
+    store = ProjectStore(":memory:")
+    with pytest.raises(KeyError):
+        store.join("missing", "pi")
+    assert store.projects() == []
+
+
+def test_create_refuses_a_second_project_and_lists_the_existing_one():
+    store = ProjectStore(":memory:", clock=lambda: 100)
+    assert store.create("crew", "pi") is True
+    with pytest.raises(ProjectsExist) as refused:
+        store.create("crew-2", "hermes")
+    assert [entry["project"] for entry in refused.value.projects] == ["crew"]
+    assert [entry["project"] for entry in store.projects()] == ["crew"]
+
+
+def test_create_joins_when_the_name_already_exists_instead_of_duplicating():
+    store = ProjectStore(":memory:", clock=lambda: 100)
+    store.create("crew", "pi")
+    assert store.create("crew", "hermes") is False
+    assert len(store.projects()) == 1
+    assert [p["agent_id"] for p in store.participants("crew")] == ["hermes", "pi"]
+
+
+def test_concurrent_same_name_project_creation_joins_one_shared_project(tmp_path):
+    store = ProjectStore(tmp_path / "messages.sqlite3", clock=lambda: 100)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        created = list(
+            executor.map(
+                lambda agent: store.create("agent-commons", agent),
+                ("agent-a", "agent-b"),
+            )
+        )
+
+    assert sorted(created) == [False, True]
+    assert [entry["project"] for entry in store.projects()] == ["agent-commons"]
+    assert [p["agent_id"] for p in store.participants("agent-commons")] == [
+        "agent-a",
+        "agent-b",
+    ]
+
+
+def test_create_allows_a_deliberate_additional_project():
+    store = ProjectStore(":memory:", clock=lambda: 100)
+    store.create("crew", "pi")
+    assert store.create("side-thread", "pi", allow_existing=True) is True
+    assert [entry["project"] for entry in store.projects()] == ["crew", "side-thread"]
+
+
+def test_join_keeps_a_project_alive_without_any_message():
+    now = [0]
+    store = ProjectStore(":memory:", idle_ttl_seconds=100, clock=lambda: now[0])
+    store.create("crew", "pi")
+    now[0] = 90
+    store.join("crew", "hermes")
+    now[0] = 150
+    assert [entry["project"] for entry in store.projects()] == ["crew"]
+    assert [p["agent_id"] for p in store.participants("crew")] == ["hermes", "pi"]

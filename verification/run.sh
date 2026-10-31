@@ -61,7 +61,7 @@ import zipfile
 wheels = list(Path(sys.argv[1]).glob("*.whl"))
 assert len(wheels) == 1, f"expected one wheel, got {len(wheels)}"
 names = set(zipfile.ZipFile(wheels[0]).namelist())
-assert {"roomctl.py", "app/client.py", "app/join.md"} <= names
+assert {"roomctl.py", "app/client.py", "app/join.md", "app/agent_setup.md"} <= names
 print("Source/wheel build and installed module inclusion: PASS")
 PY
 

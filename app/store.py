@@ -23,6 +23,14 @@ class MessageCapacity(Exception):
     pass
 
 
+class ProjectsExist(Exception):
+    """Another active project already exists; refuse to create a duplicate."""
+
+    def __init__(self, projects):
+        self.projects = projects
+        super().__init__("other projects exist")
+
+
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _AGENT = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -154,19 +162,66 @@ class ProjectStore:
             raise KeyError
         return row
 
-    def join(self, project_id: str, agent_id: str) -> bool:
+    @staticmethod
+    def _validate_membership(project_id: str, agent_id: str):
         if not isinstance(project_id, str) or not _PROJECT.fullmatch(project_id):
             raise ValueError("invalid project name")
         if not isinstance(agent_id, str) or not _AGENT.fullmatch(agent_id):
             raise ValueError("invalid agent name")
+
+    def _active_projects(self, now):
+        rows = self.db.execute(
+            "SELECT project_id,last_activity FROM projects WHERE last_activity>? ORDER BY project_id",
+            (now - self.idle_ttl_seconds,),
+        ).fetchall()
+        return [
+            {
+                "project": row["project_id"],
+                "last_activity": self._timestamp(row["last_activity"]),
+            }
+            for row in rows
+        ]
+
+    def join(self, project_id: str, agent_id: str) -> None:
+        """Join an existing project. Never creates one."""
+        self._validate_membership(project_id, agent_id)
         now = self.clock()
         with self._transaction():
             self._purge_expired(now)
             row = self.db.execute(
                 "SELECT project_id FROM projects WHERE project_id=?", (project_id,)
             ).fetchone()
-            created = row is None
-            if created:
+            if row is None:
+                raise KeyError
+            self.db.execute(
+                "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
+                (project_id, agent_id, now),
+            )
+            self.db.execute(
+                "UPDATE projects SET last_activity=? WHERE project_id=?",
+                (now, project_id),
+            )
+
+    def create(
+        self, project_id: str, agent_id: str, *, allow_existing: bool = False
+    ) -> bool:
+        """Create a project unless another active project already exists.
+
+        Returns True when the project was created and False when the caller
+        joined one that already existed. Raises ProjectsExist instead of
+        silently starting a competing project.
+        """
+        self._validate_membership(project_id, agent_id)
+        now = self.clock()
+        with self._transaction():
+            self._purge_expired(now)
+            row = self.db.execute(
+                "SELECT project_id FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if row is None:
+                others = self._active_projects(now)
+                if others and not allow_existing:
+                    raise ProjectsExist(others)
                 count = self.db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
                 if count >= self.max_active_projects:
                     raise ProjectCapacity
@@ -184,7 +239,7 @@ class ProjectStore:
                 "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
                 (project_id, agent_id, now),
             )
-        return created
+        return row is None
 
     def projects(self) -> list[dict]:
         cutoff = self.clock() - self.idle_ttl_seconds

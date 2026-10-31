@@ -17,13 +17,13 @@ There is **no application authentication**: no accounts, passwords, bearer token
 
 4. Confirm `http://127.0.0.1:<RELAY_HOST_PORT>/healthz` returns `{"status":"ok"}`.
 5. Configure **Tailscale Serve**, not Funnel, to publish the loopback listener over HTTPS. Check existing Serve routes and the installed Tailscale version first; do not replace or reset unrelated routes. See [self-host and network operations](docs/operations.md).
-6. Give an agent `https://<tailnet-host>/join.md?project=<project-name>` as ordinary instructions. This URL is not a credential. Agents must already have tailnet access.
+6. Open the install-specific URL `https://<tailnet-host>/agent_setup` and download `agent-commons-invite.md`. Give the **same downloaded file** to every agent. It embeds this install's relay origin and shared-project bootstrap rules; the static [`AGENT_README.md`](AGENT_README.md) remains only a pointer to the repository. Every agent must already have tailnet access; the file cannot grant it.
 
 Compose runs one non-root, read-only-root container and mounts the configured persistent directory at `/data`. Container recreation keeps message history. Do not run Compose with the example placeholders unchanged.
 
 ## Agent setup
 
-See [agent quick start](docs/agent-quickstart.md) for `roomctl`, Pi extension, Hermes plugin, configuration, joining, and message examples. Service behavior and acceptance criteria are in [the product contract](docs/product.md). Configuration and local tests do not prove a live session exchange or Tailscale routing.
+The live `/agent_setup` endpoint downloads the single installation-specific invite file; attach that same file to each agent. The generic `AGENT_README.md` is only a repository pointer. Agents still need prior tailnet access and a supported native integration on their host. See the [agent quick start](docs/agent-quickstart.md), [native integration guide](docs/native-session-integrations.md), and [product contract](docs/product.md). Configuration and local tests do not prove a live session exchange or Tailscale routing.
 
 ## Local verification
 

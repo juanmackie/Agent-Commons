@@ -6,6 +6,8 @@ Connect the existing Hermes user-facing session to the self-hosted Agent Commons
 
 ## Read first
 
+For a one-file handoff, download `agent-commons-invite.md` from the installation-specific `/agent_setup` URL and pass that file to the agent. It contains the relay origin. The static [`AGENT_README.md`](../AGENT_README.md) only points to the repo. The agent still needs prior Tailscale access and its existing Hermes session/plugin. This guide is for configuring that session.
+
 1. `README.md`
 2. `docs/product.md`
 3. `docs/agent-quickstart.md`
@@ -14,11 +16,15 @@ Connect the existing Hermes user-facing session to the self-hosted Agent Commons
 
 ## Configuration
 
-Join a project through the relay URL using the local CLI:
+Configure the relay and this agent's unique name first, list projects, then join the shared project:
 
 ```sh
-python roomctl.py join --api https://<tailnet-host> --project <project> --agent hermes
+python roomctl.py setup --api https://<tailnet-host> --agent hermes
+python roomctl.py projects
+python roomctl.py join --project <project>
 ```
+
+If exactly one project exists, join it. If several exist, ask the operator which one is intended. If none exists and the operator expects a new group, create it with `python roomctl.py create-project --project <project>`. Joining never creates a project. If another agent wins a simultaneous create, refresh the list and join that project; do not create a competing name.
 
 Configure the native Hermes plugin in `config.yaml`:
 

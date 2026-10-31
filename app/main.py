@@ -19,7 +19,13 @@ from pydantic import (
     field_validator,
 )
 
-from app.store import Conflict, MessageCapacity, ProjectCapacity, ProjectStore
+from app.store import (
+    Conflict,
+    MessageCapacity,
+    ProjectCapacity,
+    ProjectStore,
+    ProjectsExist,
+)
 
 MAX_TEXT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 100 * 1024
@@ -50,6 +56,10 @@ class JoinInput(BaseModel):
                 "agent must contain 1-64 letters, digits, underscores, or hyphens"
             )
         return value
+
+
+class ProjectInput(JoinInput):
+    allow_existing: StrictBool = False
 
 
 class MessageInput(BaseModel):
@@ -102,7 +112,7 @@ class BodyLimitMiddleware:
         self.max_body_bytes = max_body_bytes
 
     async def __call__(self, scope, receive, send):
-        limited_paths = {"/v1/join", "/v1/messages"}
+        limited_paths = {"/v1/join", "/v1/projects", "/v1/messages"}
         if (
             scope["type"] != "http"
             or scope.get("method") != "POST"
@@ -187,6 +197,18 @@ def create_app(
     def healthz():
         return {"status": "ok"}
 
+    @app.get("/agent_setup", response_class=PlainTextResponse)
+    def agent_setup(request: Request):
+        origin = str(request.base_url).rstrip("/")
+        content = Path(__file__).with_name("agent_setup.md").read_text(encoding="utf-8")
+        return PlainTextResponse(
+            content.replace("{{ORIGIN}}", origin),
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": 'attachment; filename="agent-commons-invite.md"',
+            },
+        )
+
     @app.get("/join.md", response_class=PlainTextResponse)
     def invitation(request: Request, project: str = Query(min_length=1, max_length=64)):
         if not _PROJECT.fullmatch(project):
@@ -201,18 +223,53 @@ def create_app(
     @app.post("/v1/join")
     def join(value: JoinInput):
         try:
-            created = get_store().join(value.project, value.agent)
+            get_store().join(value.project, value.agent)
+        except KeyError:
+            return JSONResponse(
+                {
+                    "detail": "project does not exist; create it with POST /v1/projects",
+                    "code": "project_missing",
+                    "projects": get_store().projects(),
+                },
+                status_code=404,
+            )
+        return {
+            "project": value.project,
+            "agent": value.agent,
+            "created": False,
+            "participants": get_store().participants(value.project),
+        }
+
+    @app.post("/v1/projects", status_code=201)
+    def create_project(value: ProjectInput):
+        try:
+            created = get_store().create(
+                value.project, value.agent, allow_existing=value.allow_existing
+            )
+        except ProjectsExist as error:
+            return JSONResponse(
+                {
+                    "detail": "another project already exists; join it instead of creating a duplicate",
+                    "code": "projects_exist",
+                    "projects": error.projects,
+                },
+                status_code=409,
+            )
         except ProjectCapacity:
             return JSONResponse(
                 {"detail": "project capacity reached", "code": "project_capacity"},
                 status_code=429,
             )
-        return {
-            "project": value.project,
-            "agent": value.agent,
-            "created": created,
-            "participants": get_store().participants(value.project),
-        }
+        return JSONResponse(
+            {
+                "project": value.project,
+                "agent": value.agent,
+                "created": created,
+                "participants": get_store().participants(value.project),
+            },
+            status_code=201 if created else 200,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/v1/projects")
     def projects():

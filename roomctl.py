@@ -8,7 +8,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from app.client import RelayClient, RelayError, validate_api_url
+from app.client import RelayClient, RelayError, validate_agent_id, validate_api_url
 
 
 def config_path() -> Path:
@@ -62,13 +62,29 @@ def ensure_config_replace_allowed(replace: bool):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="roomctl")
     commands = parser.add_subparsers(dest="command", required=True)
-    join = commands.add_parser(
-        "join", help="join a project from its ordinary invitation details"
+    setup = commands.add_parser(
+        "setup", help="save this agent's relay address and name before choosing a project"
     )
-    join.add_argument("--api", required=True)
+    setup.add_argument("--api", required=True)
+    setup.add_argument("--agent", default=os.getenv("AGENT_ID", "agent"))
+    setup.add_argument("--replace", action="store_true")
+    join = commands.add_parser(
+        "join", help="join a project using the saved relay setup"
+    )
+    join.add_argument("--api")
     join.add_argument("--project", required=True)
-    join.add_argument("--agent", default=os.getenv("AGENT_ID", "agent"))
+    join.add_argument("--agent")
     join.add_argument("--replace", action="store_true")
+    create_project = commands.add_parser(
+        "create-project", help="create a project and join it as the first agent"
+    )
+    create_project.add_argument("--project", required=True)
+    create_project.add_argument("--replace", action="store_true")
+    create_project.add_argument(
+        "--additional",
+        action="store_true",
+        help="create this project even though another active project already exists",
+    )
     send = commands.add_parser("send")
     send.add_argument("--to", required=True)
     send.add_argument("--thread", default=None)
@@ -81,18 +97,92 @@ def main(argv=None):
     commands.add_parser("status")
     args = parser.parse_args(argv)
     try:
-        if args.command == "join":
-            ensure_config_replace_allowed(args.replace)
+        if args.command == "setup":
             api = validate_api_url(args.api)
-            client = RelayClient(api, args.project, args.agent)
-            result = client.join()
-            write_config({"api": api, "project": args.project, "agent_id": args.agent})
-            print(
-                json.dumps(result | {"config": str(config_path())}, ensure_ascii=False)
-            )
+            agent = validate_agent_id(args.agent)
+            if RelayClient(api, None, agent).healthz().get("status") != "ok":
+                raise RelayError(f"relay at {api} is not healthy; check the URL and tailnet access")
+            existing = read_config() if config_path().exists() else None
+            if existing and not args.replace:
+                if existing.get("api") == api and existing.get("agent_id") == agent:
+                    print(json.dumps({"api": api, "agent_id": agent, "project": existing.get("project"), "config": str(config_path())}))
+                    return 0
+                raise RelayError("local config already exists; back it up, then use --replace")
+            if args.replace:
+                ensure_config_replace_allowed(True)
+            config = {"api": api, "agent_id": agent}
+            if existing and existing.get("api") == api and existing.get("agent_id") == agent:
+                if existing.get("project"):
+                    config["project"] = existing["project"]
+            write_config(config)
+            print(json.dumps(config | {"config": str(config_path())}, ensure_ascii=False))
             return 0
+
+        if args.command in {"join", "create-project"}:
+            existing = read_config() if config_path().exists() else {}
+            project = args.project
+            api = validate_api_url(args.api) if args.command == "join" and args.api else existing.get("api")
+            if not api:
+                raise RelayError("run `roomctl setup --api <relay-url> --agent <name>` first")
+            agent = (
+                args.agent or existing.get("agent_id") or os.getenv("AGENT_ID", "agent")
+                if args.command == "join"
+                else existing.get("agent_id")
+            )
+            if not agent:
+                raise RelayError("run `roomctl setup --api <relay-url> --agent <name>` first")
+            agent = validate_agent_id(agent)
+            replacing = args.replace
+            if existing and not replacing and (
+                existing.get("api") != api
+                or existing.get("agent_id") != agent
+                or (existing.get("project") and existing["project"] != project)
+            ):
+                raise RelayError("local config already exists; back it up, then use --replace")
+            if replacing:
+                ensure_config_replace_allowed(True)
+            client = RelayClient(api, project, agent)
+            if args.command == "create-project":
+                try:
+                    result = client.create(allow_existing=args.additional)
+                except RelayError as error:
+                    if error.payload.get("code") != "projects_exist":
+                        raise
+                    existing = [
+                        entry.get("project") for entry in error.payload.get("projects", [])
+                    ]
+                    raise RelayError(
+                        "a project already exists; join it instead of creating a duplicate. "
+                        f"Existing projects: {', '.join(existing) or '(none listed)'}. "
+                        "Run `roomctl join --project <name>`, or pass --additional to create "
+                        "another project deliberately."
+                    ) from None
+                if not result.get("created"):
+                    print(
+                        "project already existed; joined it instead of creating a duplicate",
+                        file=sys.stderr,
+                    )
+            else:
+                try:
+                    result = client.join()
+                except RelayError as error:
+                    if error.payload.get("code") != "project_missing":
+                        raise
+                    existing = [
+                        entry.get("project") for entry in error.payload.get("projects", [])
+                    ]
+                    raise RelayError(
+                        f"project '{project}' does not exist. "
+                        f"Existing projects: {', '.join(existing) or '(none)'}. "
+                        "Join one of those, or create this project with "
+                        "`roomctl create-project --project <name>`."
+                    ) from None
+            write_config({"api": api, "project": project, "agent_id": agent})
+            print(json.dumps(result | {"config": str(config_path())}, ensure_ascii=False))
+            return 0
+
         config = read_config()
-        client = RelayClient(config["api"], config["project"], config["agent_id"])
+        client = RelayClient(config["api"], config.get("project"), config["agent_id"])
         if args.command == "send":
             db = state_db()
             existing = db.execute(

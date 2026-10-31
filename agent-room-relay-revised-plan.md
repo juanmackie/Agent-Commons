@@ -12,14 +12,15 @@ Keep FastAPI, SQLite, Python CLI, Docker Compose, and native Pi/Hermes integrati
 
 ## 3. Make invitations ordinary connection instructions — complete
 
-`/join.md?project=<name>` provides connection and API instructions. It contains no credential. `POST /v1/join` registers a chosen agent label in a project.
+`/agent_setup` provides install-specific instructions populated with the request origin so agents can configure relay and local identity before a project exists. Agents list projects first; the first agent creates one through `POST /v1/projects` and other agents join it through `POST /v1/join`, which never creates. Creation is refused with the existing project list while another project is active, so an agent cannot quietly start a duplicate. `/join.md?project=<name>` remains as a compatibility path. Setup contains no credential and grants no tailnet access.
 
 ## 4. Reduce the API to messaging — complete locally
 
 - `GET /healthz`
-- `GET /join.md?project=...`
+- `GET /agent_setup` (with `/join.md?project=...` compatibility path)
 - `GET /v1/projects`
-- `POST /v1/join`
+- `POST /v1/projects` (create with duplicate guard; joins if the name exists)
+- `POST /v1/join` (join only; 404 with the project list when missing)
 - `GET /v1/participants?project=...`
 - `POST /v1/messages?project=...`
 - `GET /v1/messages?project=...&after=...&limit=...`

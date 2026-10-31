@@ -8,7 +8,10 @@ import urllib.request
 
 
 class RelayError(Exception):
-    pass
+    def __init__(self, message: str, *, status: int | None = None, payload=None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload if isinstance(payload, dict) else {}
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -49,15 +52,23 @@ def validate_api_url(base_url: str) -> str:
 
 
 class RelayClient:
-    def __init__(self, base_url: str, project: str, agent_id: str, timeout: float = 20):
+    def __init__(
+        self, base_url: str, project: str | None, agent_id: str, timeout: float = 20
+    ):
         self.base_url = validate_api_url(base_url)
-        if not isinstance(project, str) or not _PROJECT.fullmatch(project):
+        if project is not None and (
+            not isinstance(project, str) or not _PROJECT.fullmatch(project)
+        ):
             raise ValueError("invalid project name")
-        if not isinstance(agent_id, str) or not _LABEL.fullmatch(agent_id):
-            raise ValueError("invalid agent name")
+        validate_agent_id(agent_id)
         self.project = project
         self.agent_id = agent_id
         self.timeout = timeout
+
+    def _require_project(self):
+        if self.project is None:
+            raise RelayError("create or join a project first")
+        return self.project
 
     def _request(self, method: str, path: str, payload=None):
         data = (
@@ -75,28 +86,69 @@ class RelayClient:
             with _opener.open(request, timeout=self.timeout) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as error:
-            raise RelayError(f"relay returned HTTP {error.code}") from None
+            payload = None
+            try:
+                payload = json.loads(error.read())
+            except (OSError, ValueError):
+                payload = None
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            message = f"relay returned HTTP {error.code}"
+            if isinstance(detail, str) and detail:
+                message = f"{message}: {detail}"
+            raise RelayError(message, status=error.code, payload=payload) from None
         except (urllib.error.URLError, TimeoutError) as error:
             raise RelayError(f"relay unavailable: {type(error).__name__}") from None
 
-    def join(self):
+    def join(self, project: str | None = None):
+        selected_project = project or self._require_project()
+        if not isinstance(selected_project, str) or not _PROJECT.fullmatch(
+            selected_project
+        ):
+            raise ValueError("invalid project name")
         return self._request(
-            "POST", "/v1/join", {"project": self.project, "agent": self.agent_id}
+            "POST",
+            "/v1/join",
+            {"project": selected_project, "agent": self.agent_id},
+        )
+
+    def create(self, project: str | None = None, *, allow_existing: bool = False):
+        selected_project = project or self._require_project()
+        if not isinstance(selected_project, str) or not _PROJECT.fullmatch(
+            selected_project
+        ):
+            raise ValueError("invalid project name")
+        return self._request(
+            "POST",
+            "/v1/projects",
+            {
+                "project": selected_project,
+                "agent": self.agent_id,
+                "allow_existing": allow_existing,
+            },
         )
 
     def projects(self):
         return self._request("GET", "/v1/projects")
 
+    def healthz(self):
+        return self._request("GET", "/healthz")
+
     def participants(self):
-        query = urllib.parse.urlencode({"project": self.project})
+        query = urllib.parse.urlencode({"project": self._require_project()})
         return self._request("GET", "/v1/participants?" + query)
 
     def read(self, after: int, limit: int = 100):
         query = urllib.parse.urlencode(
-            {"project": self.project, "after": after, "limit": limit}
+            {"project": self._require_project(), "after": after, "limit": limit}
         )
         return self._request("GET", "/v1/messages?" + query)
 
     def post(self, message: dict):
-        query = urllib.parse.urlencode({"project": self.project})
+        query = urllib.parse.urlencode({"project": self._require_project()})
         return self._request("POST", "/v1/messages?" + query, message)
+
+
+def validate_agent_id(agent_id: str) -> str:
+    if not isinstance(agent_id, str) or not _LABEL.fullmatch(agent_id):
+        raise ValueError("invalid agent name")
+    return agent_id

@@ -22,16 +22,23 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
     with TestClient(
         create_app(tmp_path / "db.sqlite3"), base_url="https://relay.tailnet.test"
     ) as client:
-        invite = client.get("/join.md?project=demo")
+        invite = client.get("/agent_setup")
         assert (
             invite.status_code == 200
             and "https://relay.tailnet.test" in invite.text
-            and "demo" in invite.text
         )
-        assert "not a password or access token" in invite.text
+        assert invite.headers["content-disposition"] == 'attachment; filename="agent-commons-invite.md"'
+        assert "does not create or join a project" in invite.text
+        assert "python roomctl.py create-project --project agent-commons" in invite.text
+        assert "{{ORIGIN}}" not in invite.text
+        assert "Every agent receiving this same invite uses that same rule and project name" in invite.text
+        assert "If another project appears during a race" in invite.text
+        assert client.get("/join.md?project=demo").status_code == 200
         assert (
-            client.post("/v1/join", json={"project": "demo", "agent": "pi"}).status_code
-            == 200
+            client.post(
+                "/v1/projects", json={"project": "demo", "agent": "pi"}
+            ).status_code
+            == 201
         )
         client.post("/v1/join", json={"project": "demo", "agent": "hermes"})
         directory = client.get("/v1/participants?project=demo")
@@ -71,7 +78,7 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
 
 def test_api_validation_bounded_text_and_conflicting_retry(tmp_path):
     with TestClient(create_app(tmp_path / "db.sqlite3")) as client:
-        client.post("/v1/join", json={"project": "demo", "agent": "pi"})
+        client.post("/v1/projects", json={"project": "demo", "agent": "pi"})
         value = envelope()
         assert client.post("/v1/messages?project=demo", json=value).status_code == 201
         assert (
@@ -102,3 +109,44 @@ def test_api_validation_bounded_text_and_conflicting_retry(tmp_path):
         )
         assert client.get("/v1/messages?project=demo&limit=101").status_code == 422
         assert client.get("/healthz").json() == {"status": "ok"}
+
+
+def test_project_creation_checks_existing_projects_before_starting_a_new_one(tmp_path):
+    with TestClient(create_app(tmp_path / "db.sqlite3")) as client:
+        missing = client.post("/v1/join", json={"project": "crew", "agent": "pi"})
+        assert missing.status_code == 404
+        assert missing.json()["code"] == "project_missing"
+        assert missing.json()["projects"] == []
+
+        created = client.post("/v1/projects", json={"project": "crew", "agent": "pi"})
+        assert created.status_code == 201 and created.json()["created"] is True
+
+        refused = client.post(
+            "/v1/projects", json={"project": "crew-2", "agent": "hermes"}
+        )
+        assert refused.status_code == 409
+        assert refused.json()["code"] == "projects_exist"
+        assert [entry["project"] for entry in refused.json()["projects"]] == ["crew"]
+
+        joined = client.post("/v1/join", json={"project": "crew", "agent": "hermes"})
+        assert joined.status_code == 200 and joined.json()["created"] is False
+
+        again = client.post("/v1/projects", json={"project": "crew", "agent": "pi"})
+        assert again.status_code == 200 and again.json()["created"] is False
+        assert [
+            entry["project"]
+            for entry in client.get("/v1/projects").json()["projects"]
+        ] == ["crew"]
+
+        extra = client.post(
+            "/v1/projects",
+            json={"project": "crew-2", "agent": "pi", "allow_existing": True},
+        )
+        assert extra.status_code == 201 and extra.json()["created"] is True
+
+        nowhere = client.post("/v1/join", json={"project": "nope", "agent": "pi"})
+        assert nowhere.status_code == 404
+        assert {entry["project"] for entry in nowhere.json()["projects"]} == {
+            "crew",
+            "crew-2",
+        }

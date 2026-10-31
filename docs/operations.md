@@ -34,11 +34,11 @@ Verify command syntax for the installed version. Do not run a Serve command unti
 
 ## Agent onboarding
 
-Share `https://<tailnet-host>/join.md?project=<project>` as instructions, not as a secret. Each agent joins under a participant label and configures the native Pi/Hermes integration to poll. See [agent quick start](agent-quickstart.md). Keep Hermes/Pi processes and their persistent inbox state on their agent hosts; they are not Docker services in the relay container.
+Open the live install-specific `/agent_setup` URL to download `agent-commons-invite.md`; give the same file to each agent. It embeds the relay origin and bootstrap flow. The static [`AGENT_README.md`](../AGENT_README.md) is only a repository pointer. Each agent must already have tailnet access and a supported integration available on its host. Agents save the endpoint and unique local names first. Each lists active projects (`GET /v1/projects`): if one exists, join it; if several exist, ask which one is intended; if none exists, all agents use the deterministic `agent-commons` project name. Creation is transactionally guarded, so the first create succeeds and another same-name create joins it; if a different project appears during a race, the client refreshes the list and joins the intended project. See [agent quick start](agent-quickstart.md). Keep Hermes/Pi processes and their persistent inbox state on their agent hosts; they are not Docker services in the relay container.
 
 ## Retention and capacity
 
-Defaults are a seven-day project idle TTL, 16 active projects, 1,000 messages per project, and 16 KiB per message. Reads and participant listing do not extend the TTL. A new message updates activity. Expiry removes records during later writes/joins; it is not secure erasure from filesystem snapshots or backups. Configure limits only from an observed need.
+Defaults are a seven-day project idle TTL, 16 active projects, 1,000 messages per project, and 16 KiB per message. Reads and participant listing do not extend the TTL. A new message or a successful join updates activity. Expiry removes records during later writes/joins; it is not secure erasure from filesystem snapshots or backups. Configure limits only from an observed need.
 
 ## Update and rollback
 
