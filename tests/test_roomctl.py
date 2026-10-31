@@ -1,57 +1,118 @@
 import json
 
 import roomctl
-from bridge.store import BridgeStore
 
 
-CAPABILITY = "x" * 43
-
-
-def test_create_persists_capability_without_printing_it(tmp_path, monkeypatch, capsys):
-    config_path = tmp_path / "agent-room-relay" / "config.json"
-    monkeypatch.setattr(roomctl, "config_path", lambda: config_path)
-    monkeypatch.setenv("AGENT_ID", "pi")
-    monkeypatch.setattr(roomctl.RelayClient, "create_room", lambda api: {"room_id": CAPABILITY, "idle_ttl_seconds": 604800})
-
-    assert roomctl.main(["create", "--api", "http://127.0.0.1:8080"]) == 0
-    assert json.loads(config_path.read_text())["room_id"] == CAPABILITY
-    assert CAPABILITY not in capsys.readouterr().out
-
-
-def test_retry_command_requeues_only_an_explicitly_failed_local_message(tmp_path, monkeypatch, capsys):
-    state_path = tmp_path / "bridge.sqlite3"
-    store = BridgeStore(state_path)
-    store.ingest([{"seq": 1, "thread_id": "thread-1", "sender": "hermes", "recipient": "pi", "hop": 0, "text": "task"}], 1)
-    store.mark_failed(1, "thread_budget_exhausted")
-    store.db.close()
-    monkeypatch.setenv("BRIDGE_STATE_DB", str(state_path))
-
-    assert roomctl.main(["retry", "--seq", "1"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"seq": 1, "status": "pending"}
-    reopened = BridgeStore(state_path)
-    assert reopened.status()["failed_count"] == 0
-    assert reopened.status()["pending_count"] == 1
-    reopened.db.close()
-
-
-def test_join_uses_explicit_url_and_validates_capability_before_saving(tmp_path, monkeypatch, capsys):
-    config_path = tmp_path / "agent-room-relay" / "config.json"
-    source = tmp_path / "shared-config.json"
-    source.write_text(json.dumps({"api": "https://attacker.example", "room_id": CAPABILITY}))
-    monkeypatch.setattr(roomctl, "config_path", lambda: config_path)
+def test_join_saves_project_address_and_registers_without_secret(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "agent-commons" / "config.json"
+    monkeypatch.setattr(roomctl, "config_path", lambda: path)
     monkeypatch.setenv("AGENT_ID", "pi")
     calls = []
 
     class Client:
-        def __init__(self, api, room_id):
-            calls.append((api, room_id))
-        def read(self, after):
-            return {"messages": [], "next_after": after}
+        def __init__(self, api, project, agent):
+            calls.append((api, project, agent))
+
+        def join(self):
+            return {
+                "project": "demo",
+                "agent": "pi",
+                "created": True,
+                "participants": [{"agent_id": "pi"}],
+            }
 
     monkeypatch.setattr(roomctl, "RelayClient", Client)
-    assert roomctl.main(["join", "--api", "https://relay.tailnet", "--from", str(source)]) == 0
-    saved = json.loads(config_path.read_text())
-    assert calls == [("https://relay.tailnet", CAPABILITY)]
-    assert saved == {"api": "https://relay.tailnet", "room_id": CAPABILITY, "agent_id": "pi"}
-    output = capsys.readouterr().out
-    assert CAPABILITY not in output and "attacker.example" not in output
+    assert (
+        roomctl.main(["join", "--api", "https://relay.tailnet", "--project", "demo"])
+        == 0
+    )
+    assert json.loads(path.read_text()) == {
+        "api": "https://relay.tailnet",
+        "project": "demo",
+        "agent_id": "pi",
+    }
+    assert calls == [("https://relay.tailnet", "demo", "pi")]
+    assert "room_id" not in capsys.readouterr().out
+
+
+def test_join_replace_preserves_unresolved_outbound_message(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"api": "https://relay.tailnet", "project": "old", "agent_id": "pi"})
+    )
+    monkeypatch.setattr(roomctl, "config_path", lambda: path)
+    db = roomctl.state_db()
+    db.execute("INSERT INTO pending VALUES (?,?)", ("id", "{}"))
+    db.commit()
+    db.close()
+    assert (
+        roomctl.main(
+            [
+                "join",
+                "--api",
+                "https://relay.tailnet",
+                "--project",
+                "new",
+                "--agent",
+                "pi",
+                "--replace",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(path.read_text())["project"] == "old"
+
+
+def test_default_thread_send_reuses_persisted_payload_after_ambiguous_failure(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {"api": "https://relay.tailnet", "project": "demo", "agent_id": "pi"}
+        )
+    )
+    monkeypatch.setattr(roomctl, "config_path", lambda: path)
+    sent = []
+
+    class Client:
+        def __init__(self, *_args):
+            self.agent_id = "pi"
+
+        def post(self, payload):
+            sent.append(payload.copy())
+            if len(sent) == 1:
+                raise roomctl.RelayError("relay unavailable")
+            return {"seq": 1}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    args = ["send", "--to", "hermes", "--text", "check this"]
+    assert roomctl.main(args) == 1
+    assert roomctl.main(args) == 0
+    assert sent[0] == sent[1]
+    assert sent[0]["thread_id"] and sent[0]["client_msg_id"]
+
+
+def test_join_refuses_to_replace_existing_local_config_without_flag(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "config.json"
+    path.write_text('{"api":"https://relay.tailnet","project":"old","agent_id":"pi"}')
+    monkeypatch.setattr(roomctl, "config_path", lambda: path)
+    assert (
+        roomctl.main(
+            [
+                "join",
+                "--api",
+                "https://relay.tailnet",
+                "--project",
+                "new",
+                "--agent",
+                "pi",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(path.read_text())["project"] == "old"

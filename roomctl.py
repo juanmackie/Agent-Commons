@@ -1,4 +1,4 @@
-"""Small CLI for creating rooms and initiating/read messages."""
+"""Small CLI for joining a project and sending or reading relay messages."""
 
 import argparse
 import json
@@ -8,18 +8,17 @@ import sys
 import uuid
 from pathlib import Path
 
-from bridge.client import RelayClient, RelayError, validate_api_url
-from bridge.store import BridgeStore
+from app.client import RelayClient, RelayError, validate_api_url
 
 
 def config_path() -> Path:
-    root = Path(os.getenv("LOCALAPPDATA", Path.home())) / "agent-room-relay"
-    return root / "config.json"
+    return (
+        Path(os.getenv("LOCALAPPDATA", Path.home())) / "agent-commons" / "config.json"
+    )
 
 
 def read_config():
-    path = config_path()
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(config_path().read_text(encoding="utf-8"))
 
 
 def write_config(config):
@@ -36,108 +35,130 @@ def state_db():
     path = config_path().parent / "roomctl.sqlite3"
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
-    db.execute("CREATE TABLE IF NOT EXISTS pending(client_msg_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS pending(client_msg_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+    )
     return db
 
 
 def ensure_config_replace_allowed(replace: bool):
-    if not config_path().exists():
+    path = config_path()
+    if not path.exists():
         return
     if not replace:
-        raise RelayError("room config already exists; back it up, then use --replace")
-    state_path = config_path().parent / "roomctl.sqlite3"
-    if state_path.exists():
-        with sqlite3.connect(state_path) as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending'").fetchone()
-            if exists and db.execute("SELECT 1 FROM pending LIMIT 1").fetchone():
-                raise RelayError("a send is unresolved; retry it before replacing the room config")
+        raise RelayError("local config already exists; back it up, then use --replace")
+    pending_path = path.parent / "roomctl.sqlite3"
+    if pending_path.exists():
+        with sqlite3.connect(pending_path) as db:
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending'"
+            ).fetchone()
+            if table and db.execute("SELECT 1 FROM pending LIMIT 1").fetchone():
+                raise RelayError(
+                    "a send is unresolved; retry it before replacing the project config"
+                )
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="roomctl")
     commands = parser.add_subparsers(dest="command", required=True)
-    create = commands.add_parser("create")
-    create.add_argument("--api", required=True)
-    create.add_argument("--replace", action="store_true", help="replace existing local room configuration after backup")
-    join = commands.add_parser("join")
+    join = commands.add_parser(
+        "join", help="join a project from its ordinary invitation details"
+    )
     join.add_argument("--api", required=True)
-    join.add_argument("--from", dest="source", required=True, help="securely transferred room config file")
-    join.add_argument("--replace", action="store_true", help="replace existing local room configuration after backup")
+    join.add_argument("--project", required=True)
+    join.add_argument("--agent", default=os.getenv("AGENT_ID", "agent"))
+    join.add_argument("--replace", action="store_true")
     send = commands.add_parser("send")
     send.add_argument("--to", required=True)
-    send.add_argument("--thread", required=True)
+    send.add_argument("--thread", default=None)
+    send.add_argument("--reply-to", type=int, default=None)
     send.add_argument("--text", required=True)
     read = commands.add_parser("read")
     read.add_argument("--after", type=int, default=0)
-    retry = commands.add_parser("retry", help="retry one terminally failed local bridge message")
-    retry.add_argument("--seq", type=int, required=True)
+    commands.add_parser("projects")
+    commands.add_parser("participants")
     commands.add_parser("status")
     args = parser.parse_args(argv)
     try:
-        if args.command == "retry":
-            if args.seq <= 0:
-                raise ValueError("seq must be positive")
-            bridge_path = os.getenv("BRIDGE_STATE_DB")
-            if not bridge_path:
-                raise RelayError("BRIDGE_STATE_DB is required for local retry")
-            bridge = BridgeStore(bridge_path)
-            try:
-                if not bridge.retry_failed(args.seq):
-                    raise RelayError(f"no failed bridge message with seq {args.seq}")
-            finally:
-                bridge.db.close()
-            print(json.dumps({"seq": args.seq, "status": "pending"}))
-            return 0
-        if args.command == "create":
-            ensure_config_replace_allowed(args.replace)
-            api = validate_api_url(args.api)
-            created = RelayClient.create_room(api)
-            write_config({"api": api, "room_id": created["room_id"], "agent_id": os.getenv("AGENT_ID", "hermes")})
-            print(json.dumps({"idle_ttl_seconds": created["idle_ttl_seconds"], "config": str(config_path())}))
-            return 0
         if args.command == "join":
             ensure_config_replace_allowed(args.replace)
-            shared = json.loads(Path(args.source).read_text(encoding="utf-8"))
-            room_id = shared.get("room_id") if isinstance(shared, dict) else None
-            if not isinstance(room_id, str):
-                raise ValueError("source config must contain room_id")
             api = validate_api_url(args.api)
-            RelayClient(api, room_id).read(after=0)
-            agent_id = os.getenv("AGENT_ID", "hermes")
-            write_config({"api": api, "room_id": room_id, "agent_id": agent_id})
-            print(json.dumps({"room_config": str(config_path()), "agent_id": agent_id}))
+            client = RelayClient(api, args.project, args.agent)
+            result = client.join()
+            write_config({"api": api, "project": args.project, "agent_id": args.agent})
+            print(
+                json.dumps(result | {"config": str(config_path())}, ensure_ascii=False)
+            )
             return 0
         config = read_config()
-        client = RelayClient(config["api"], config["room_id"])
-        agent_id = config.get("agent_id", "hermes")
+        client = RelayClient(config["api"], config["project"], config["agent_id"])
         if args.command == "send":
-            payload = {"client_msg_id": str(uuid.uuid4()), "sender": agent_id, "recipient": args.to,
-                       "thread_id": str(uuid.UUID(args.thread)), "reply_to": None, "hop": 0, "text": args.text, "complete": False}
             db = state_db()
-            existing = db.execute("SELECT client_msg_id,payload FROM pending LIMIT 1").fetchone()
-            serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            existing = db.execute(
+                "SELECT client_msg_id,payload FROM pending LIMIT 1"
+            ).fetchone()
+            requested_thread = str(uuid.UUID(args.thread)) if args.thread else None
             if existing:
                 old = json.loads(existing[1])
-                if any(old[key] != payload[key] for key in ("sender", "recipient", "thread_id", "text")):
-                    raise RelayError("a previous send is unresolved; repeat it exactly before sending another")
+                if any(
+                    old[key] != value
+                    for key, value in (
+                        ("sender", client.agent_id),
+                        ("recipient", args.to),
+                        ("reply_to", args.reply_to),
+                        ("text", args.text),
+                    )
+                ) or (
+                    requested_thread is not None
+                    and old["thread_id"] != requested_thread
+                ):
+                    raise RelayError(
+                        "a previous send is unresolved; retry it exactly before sending another"
+                    )
                 payload = old
             else:
-                db.execute("INSERT INTO pending VALUES (?,?)", (payload["client_msg_id"], serialized))
+                payload = {
+                    "client_msg_id": str(uuid.uuid4()),
+                    "sender": client.agent_id,
+                    "recipient": args.to,
+                    "thread_id": requested_thread or str(uuid.uuid4()),
+                    "reply_to": args.reply_to,
+                    "hop": 0,
+                    "text": args.text,
+                    "complete": False,
+                }
+                db.execute(
+                    "INSERT INTO pending VALUES (?,?)",
+                    (
+                        payload["client_msg_id"],
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
                 db.commit()
-            response = client.post(payload)
-            db.execute("DELETE FROM pending WHERE client_msg_id=?", (payload["client_msg_id"],))
+            result = client.post(payload)
+            db.execute(
+                "DELETE FROM pending WHERE client_msg_id=?", (payload["client_msg_id"],)
+            )
             db.commit()
-            print(json.dumps(response, ensure_ascii=False))
+            print(json.dumps(result, ensure_ascii=False))
         elif args.command == "read":
             print(json.dumps(client.read(args.after), ensure_ascii=False))
+        elif args.command == "participants":
+            print(json.dumps(client.participants(), ensure_ascii=False))
+        elif args.command == "projects":
+            print(json.dumps(client.projects(), ensure_ascii=False))
         else:
-            status = {"agent_id": agent_id, "api": config["api"], "config_path": str(config_path())}
-            bridge_path = os.getenv("BRIDGE_STATE_DB")
-            if bridge_path and Path(bridge_path).is_file():
-                bridge = BridgeStore(bridge_path)
-                status["bridge"] = bridge.status()
-                bridge.db.close()
-            print(json.dumps(status))
+            print(
+                json.dumps(
+                    {
+                        "agent_id": client.agent_id,
+                        "project": client.project,
+                        "api": client.base_url,
+                        "config_path": str(config_path()),
+                    }
+                )
+            )
         return 0
     except (OSError, ValueError, KeyError, RelayError) as error:
         print(str(error), file=sys.stderr)

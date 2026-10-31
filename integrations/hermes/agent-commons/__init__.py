@@ -67,9 +67,9 @@ def plugin_settings():
 def configured_client(settings=None):
     settings = settings or plugin_settings()
     api = settings.get("api") or os.getenv("ROOM_API")
-    capability = os.getenv("ROOM_ID")
+    project = settings.get("project") or os.getenv("ROOM_PROJECT")
     agent_id = settings.get("agent_id") or os.getenv("AGENT_ID")
-    if not api or not capability or not agent_id:
+    if not api or not project or not agent_id:
         return None
     parsed = urllib.parse.urlsplit(api)
     if (
@@ -83,11 +83,11 @@ def configured_client(settings=None):
         or (parsed.scheme == "http" and parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"})
     ):
         raise ValueError("relay API must use HTTPS, or HTTP on loopback, without path, credentials, query, or fragment")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", capability):
-        raise ValueError("room capability must be a 256-bit URL-safe token")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", project):
+        raise ValueError("project must be 1-64 lowercase letters, digits, underscores, or hyphens")
     if not _LABEL.fullmatch(agent_id):
         raise ValueError("agent ID must contain 1-64 letters, digits, underscores, or hyphens")
-    return {"api": api.rstrip("/"), "capability": capability, "agent_id": agent_id}
+    return {"api": api.rstrip("/"), "project": project, "agent_id": agent_id}
 
 
 def _request(config, method, path, payload=None):
@@ -97,7 +97,6 @@ def _request(config, method, path, payload=None):
         data=body,
         method=method,
         headers={
-            "Authorization": "Bearer " + config["capability"],
             "Content-Type": "application/json",
         },
     )
@@ -119,7 +118,7 @@ def _request(config, method, path, payload=None):
 def read_page(config, cursor):
     if not isinstance(cursor, int) or isinstance(cursor, bool) or not 0 <= cursor <= 9007199254740991:
         raise ValueError("relay cursor must be a non-negative integer")
-    query = urllib.parse.urlencode({"after": cursor, "limit": 100})
+    query = urllib.parse.urlencode({"project": config["project"], "after": cursor, "limit": 100})
     result = _request(config, "GET", "/v1/messages?" + query)
     if (
         not isinstance(result, dict)
@@ -158,7 +157,8 @@ def send_message(config, *, recipient, thread_id, text, reply_to=None, hop=0, co
     message_id = _uuid4() if client_msg_id is None else client_msg_id
     if not isinstance(message_id, str) or not _UUID.fullmatch(message_id):
         raise ValueError("client message ID must be a UUID")
-    result = _request(config, "POST", "/v1/messages", {
+    query = urllib.parse.urlencode({"project": config["project"]})
+    result = _request(config, "POST", "/v1/messages?" + query, {
         "client_msg_id": message_id,
         "sender": config["agent_id"],
         "recipient": recipient,
@@ -219,8 +219,7 @@ def state_path(settings=None):
 
 
 def connection_fingerprint(config):
-    capability_hash = hashlib.sha256(config["capability"].encode("ascii")).hexdigest()
-    value = f"{config['api']}\0{config['agent_id']}\0{capability_hash}"
+    value = f"{config['api']}\0{config['project']}\0{config['agent_id']}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -722,7 +721,7 @@ def register(ctx):
         config = None
         config_error = str(error)
     else:
-        config_error = "Set agent_commons.api and agent_commons.agent_id in Hermes config.yaml, and ROOM_ID in the protected environment."
+        config_error = "Set agent_commons.api, agent_commons.project, and agent_commons.agent_id in Hermes config.yaml."
     mode = settings.get("mode", "cli")
     if mode not in {"cli", "telegram"}:
         config = None
@@ -1033,7 +1032,7 @@ def register(ctx):
                     _flush_outbox(active_cli_session_id)
                 _deliver_cli_pending()
             except Exception:
-                # Never log room content, capability, URL, or exception text.
+                # Never log message content, endpoint URLs, or exception text.
                 pass
             time.sleep(_POLL_SECONDS)
 

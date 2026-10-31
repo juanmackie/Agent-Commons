@@ -1,4 +1,4 @@
-"""HTTP API for the local room relay and browser monitor."""
+"""Unauthenticated HTTP API for the private-network Agent Commons relay."""
 
 import os
 import re
@@ -6,28 +6,60 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+)
 
-from app.store import Conflict, MessageCapacity, RoomCapacity, RoomStore
+from app.store import Conflict, MessageCapacity, ProjectCapacity, ProjectStore
 
 MAX_TEXT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 100 * 1024
 _MAX_SQLITE_INTEGER = (1 << 63) - 1
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class JoinInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: StrictStr
+    agent: StrictStr
+
+    @field_validator("project")
+    @classmethod
+    def valid_project(cls, value):
+        if not _PROJECT.fullmatch(value):
+            raise ValueError(
+                "project must be 1-64 lowercase letters, digits, underscores, or hyphens"
+            )
+        return value
+
+    @field_validator("agent")
+    @classmethod
+    def valid_agent(cls, value):
+        if not _LABEL.fullmatch(value):
+            raise ValueError(
+                "agent must contain 1-64 letters, digits, underscores, or hyphens"
+            )
+        return value
 
 
 class MessageInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     client_msg_id: StrictStr
     sender: StrictStr
     recipient: StrictStr
     thread_id: StrictStr
-    reply_to: StrictInt | None = Field(ge=0, le=_MAX_SQLITE_INTEGER)
-    hop: StrictInt = Field(ge=0, le=8)
+    reply_to: StrictInt | None = Field(default=None, ge=0, le=_MAX_SQLITE_INTEGER)
+    hop: StrictInt = Field(default=0, ge=0, le=8)
     text: StrictStr
     complete: StrictBool = False
 
@@ -45,14 +77,9 @@ class MessageInput(BaseModel):
     @classmethod
     def valid_label(cls, value):
         if not _LABEL.fullmatch(value):
-            raise ValueError("must contain 1-64 letters, digits, underscores, or hyphens")
-        return value
-
-    @field_validator("reply_to")
-    @classmethod
-    def valid_reply_to(cls, value):
-        if value is not None and value < 0:
-            raise ValueError("must be a non-negative sequence")
+            raise ValueError(
+                "must contain 1-64 letters, digits, underscores, or hyphens"
+            )
         return value
 
     @field_validator("text")
@@ -67,181 +94,191 @@ class MessageInput(BaseModel):
         return value
 
 
-class MonitorMessageInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class BodyLimitMiddleware:
+    """Bound streamed JSON bodies before FastAPI parses them."""
 
-    room_ref: StrictStr
-    client_msg_id: StrictStr
-    recipient: StrictStr
-    thread_id: StrictStr
-    reply_to: StrictInt | None = Field(default=None, ge=0, le=_MAX_SQLITE_INTEGER)
-    text: StrictStr
+    def __init__(self, app, max_body_bytes: int):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
 
-    @field_validator("room_ref")
-    @classmethod
-    def valid_room_ref(cls, value):
-        if not re.fullmatch(r"[0-9a-f]{12}", value):
-            raise ValueError("must be a 12-character room reference")
-        return value
+    async def __call__(self, scope, receive, send):
+        limited_paths = {"/v1/join", "/v1/messages"}
+        if (
+            scope["type"] != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") not in limited_paths
+        ):
+            await self.app(scope, receive, send)
+            return
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        declared = headers.get(b"content-length")
+        if declared:
+            try:
+                if int(declared) > self.max_body_bytes:
+                    await JSONResponse(
+                        {"detail": "request body too large"}, status_code=413
+                    )(scope, receive, send)
+                    return
+            except ValueError:
+                await JSONResponse(
+                    {"detail": "invalid content length"}, status_code=400
+                )(scope, receive, send)
+                return
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > self.max_body_bytes:
+                await JSONResponse(
+                    {"detail": "request body too large"}, status_code=413
+                )(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+        replayed = False
 
-    @field_validator("client_msg_id", "thread_id")
-    @classmethod
-    def canonical_uuid(cls, value):
-        try:
-            if str(uuid.UUID(value)) != value:
-                raise ValueError
-        except (ValueError, AttributeError):
-            raise ValueError("must be canonical UUID text") from None
-        return value
+        async def replay_receive():
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
 
-    @field_validator("recipient")
-    @classmethod
-    def valid_recipient(cls, value):
-        if not _LABEL.fullmatch(value):
-            raise ValueError("must contain 1-64 letters, digits, underscores, or hyphens")
-        return value
-
-    @field_validator("reply_to")
-    @classmethod
-    def valid_reply_to(cls, value):
-        if value is not None and value < 0:
-            raise ValueError("must be a non-negative sequence")
-        return value
-
-    @field_validator("text")
-    @classmethod
-    def valid_text(cls, value):
-        if not value:
-            raise ValueError("must not be empty")
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            raise ValueError("must be valid UTF-8 text") from None
-        return value
+        await self.app(scope, replay_receive, send)
 
 
-def create_app(db_path: str | Path | None = None, *, store: RoomStore | None = None) -> FastAPI:
+def create_app(
+    db_path: str | Path | None = None, *, store: ProjectStore | None = None
+) -> FastAPI:
     configured_path = db_path or os.getenv("ROOMS_DB", "/data/rooms.sqlite3")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(BodyLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
     app.state.store = store
     store_lock = threading.Lock()
 
-    def get_store() -> RoomStore:
+    def get_store() -> ProjectStore:
         with store_lock:
             if app.state.store is None:
-                app.state.store = RoomStore(
+                app.state.store = ProjectStore(
                     configured_path,
                     idle_ttl_seconds=int(os.getenv("ROOM_IDLE_TTL_SECONDS", "604800")),
-                    max_active_rooms=int(os.getenv("MAX_ACTIVE_ROOMS", "16")),
-                    max_messages_per_room=int(os.getenv("MAX_MESSAGES_PER_ROOM", "1000")),
+                    max_active_projects=int(os.getenv("MAX_ACTIVE_PROJECTS", "16")),
+                    max_messages_per_project=int(
+                        os.getenv("MAX_MESSAGES_PER_PROJECT", "1000")
+                    ),
                 )
             return app.state.store
 
-    @app.middleware("http")
-    async def enforce_body_limit(request: Request, call_next):
-        if request.method == "POST" and request.url.path in {"/v1/rooms", "/v1/messages", "/v1/monitor/messages"}:
-            length = request.headers.get("content-length")
-            if length is not None:
-                try:
-                    if int(length) > MAX_BODY_BYTES:
-                        return JSONResponse({"detail": "request body too large"}, status_code=413)
-                except ValueError:
-                    return JSONResponse({"detail": "invalid content length"}, status_code=400)
-            body = await request.body()
-            if len(body) > MAX_BODY_BYTES:
-                return JSONResponse({"detail": "request body too large"}, status_code=413)
-            if request.url.path == "/v1/rooms" and body:
-                return JSONResponse({"detail": "room creation body must be empty"}, status_code=422)
-        return await call_next(request)
-
     @app.exception_handler(RequestValidationError)
     async def malformed_or_invalid(request, exc):
-        errors = [{"loc": error.get("loc"), "msg": error.get("msg"), "type": error.get("type")} for error in exc.errors()]
+        errors = [
+            {
+                "loc": error.get("loc"),
+                "msg": error.get("msg"),
+                "type": error.get("type"),
+            }
+            for error in exc.errors()
+        ]
         return JSONResponse({"detail": errors}, status_code=422)
-
-    def authorized(authorization: str | None) -> str:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="invalid room id")
-        room_id = authorization[7:]
-        if not room_id or len(room_id) > 128:
-            raise HTTPException(status_code=401, detail="invalid room id")
-        return room_id
-
-    @app.get("/", include_in_schema=False)
-    def discussion_monitor():
-        return FileResponse(Path(__file__).with_name("monitor.html"), headers={"Cache-Control": "no-store"})
 
     @app.get("/healthz")
     def healthz():
         return {"status": "ok"}
 
-    @app.get("/v1/rooms")
-    def list_rooms():
-        return JSONResponse({"rooms": get_store().list_active_rooms()}, headers={"Cache-Control": "no-store"})
+    @app.get("/join.md", response_class=PlainTextResponse)
+    def invitation(request: Request, project: str = Query(min_length=1, max_length=64)):
+        if not _PROJECT.fullmatch(project):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        origin = str(request.base_url).rstrip("/")
+        content = Path(__file__).with_name("join.md").read_text(encoding="utf-8")
+        return PlainTextResponse(
+            content.replace("{{PROJECT}}", project).replace("{{ORIGIN}}", origin),
+            headers={"Cache-Control": "no-store"},
+        )
 
-    @app.post("/v1/rooms", status_code=201)
-    def create_room():
+    @app.post("/v1/join")
+    def join(value: JoinInput):
         try:
-            return {"room_id": get_store().create_room(), "idle_ttl_seconds": get_store().idle_ttl_seconds}
-        except RoomCapacity:
-            return JSONResponse({"detail": "room capacity reached", "code": "room_capacity"}, status_code=429)
-
-    @app.get("/v1/monitor/messages")
-    def monitor_messages(after: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100)):
-        messages, next_after = get_store().read_active_messages(after=after, limit=limit)
-        return JSONResponse({"messages": messages, "next_after": next_after}, headers={"Cache-Control": "no-store"})
-
-    @app.post("/v1/monitor/messages")
-    def post_monitor_message(message: MonitorMessageInput):
-        if len(message.text.encode("utf-8")) > MAX_TEXT_BYTES:
-            raise HTTPException(status_code=413, detail="text exceeds 16 KiB UTF-8 limit")
-        payload = {
-            "client_msg_id": message.client_msg_id,
-            "sender": "user",
-            "recipient": message.recipient,
-            "thread_id": message.thread_id,
-            "reply_to": message.reply_to,
-            "hop": 0,
-            "text": message.text,
-            "complete": False,
+            created = get_store().join(value.project, value.agent)
+        except ProjectCapacity:
+            return JSONResponse(
+                {"detail": "project capacity reached", "code": "project_capacity"},
+                status_code=429,
+            )
+        return {
+            "project": value.project,
+            "agent": value.agent,
+            "created": created,
+            "participants": get_store().participants(value.project),
         }
+
+    @app.get("/v1/projects")
+    def projects():
+        return JSONResponse(
+            {"projects": get_store().projects()}, headers={"Cache-Control": "no-store"}
+        )
+
+    @app.get("/v1/participants")
+    def participants(project: str = Query(min_length=1, max_length=64)):
         try:
-            result, created = get_store().post_to_room_ref(message.room_ref, payload)
+            return JSONResponse(
+                {"project": project, "participants": get_store().participants(project)},
+                headers={"Cache-Control": "no-store"},
+            )
         except KeyError:
-            raise HTTPException(status_code=404, detail="room is no longer available") from None
-        except Conflict:
-            raise HTTPException(status_code=409, detail="client_msg_id payload conflict") from None
+            raise HTTPException(status_code=404, detail="project not found") from None
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
-        except MessageCapacity:
-            return JSONResponse({"detail": "message capacity reached", "code": "message_capacity"}, status_code=507)
-        return JSONResponse(result | {"room_ref": message.room_ref}, status_code=201 if created else 200, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/messages", status_code=201)
-    def post_message(message: MessageInput, authorization: str | None = Header(default=None)):
-        room_id = authorized(authorization)
+    def post_message(
+        message: MessageInput, project: str = Query(min_length=1, max_length=64)
+    ):
         if len(message.text.encode("utf-8")) > MAX_TEXT_BYTES:
-            raise HTTPException(status_code=413, detail="text exceeds 16 KiB UTF-8 limit")
+            raise HTTPException(
+                status_code=413, detail="text exceeds 16 KiB UTF-8 limit"
+            )
         try:
-            result, created = get_store().post(room_id, message.model_dump())
+            result, created = get_store().post(project, message.model_dump())
         except KeyError:
-            raise HTTPException(status_code=401, detail="invalid room id") from None
-        except Conflict:
-            raise HTTPException(status_code=409, detail="client_msg_id payload conflict") from None
+            raise HTTPException(
+                status_code=404, detail="project not found; join first"
+            ) from None
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
+        except Conflict:
+            raise HTTPException(
+                status_code=409, detail="client_msg_id payload conflict"
+            ) from None
         except MessageCapacity:
-            return JSONResponse({"detail": "message capacity reached", "code": "message_capacity"}, status_code=507)
-        return JSONResponse(result, status_code=201 if created else 200)
+            return JSONResponse(
+                {"detail": "message capacity reached", "code": "message_capacity"},
+                status_code=507,
+            )
+        return JSONResponse(
+            result,
+            status_code=201 if created else 200,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/v1/messages")
-    def read_messages(authorization: str | None = Header(default=None), after: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100)):
-        room_id = authorized(authorization)
+    def read_messages(
+        project: str = Query(min_length=1, max_length=64),
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=100),
+    ):
         try:
-            messages, next_after = get_store().read(room_id, after=after, limit=limit)
+            messages, next_after = get_store().read(project, after=after, limit=limit)
         except KeyError:
-            raise HTTPException(status_code=401, detail="invalid room id") from None
-        return {"messages": messages, "next_after": next_after}
+            raise HTTPException(status_code=404, detail="project not found") from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        return JSONResponse(
+            {"messages": messages, "next_after": next_after},
+            headers={"Cache-Control": "no-store"},
+        )
 
     return app
 

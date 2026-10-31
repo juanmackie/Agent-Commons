@@ -1,21 +1,21 @@
-"""Durable room and append-only message storage."""
+"""Durable project membership and append-only relay message storage."""
 
 import contextlib
 import datetime
 import hashlib
-import secrets
+import re
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 class Conflict(Exception):
     pass
 
 
-class RoomCapacity(Exception):
+class ProjectCapacity(Exception):
     pass
 
 
@@ -23,59 +23,96 @@ class MessageCapacity(Exception):
     pass
 
 
-class RoomStore:
-    def __init__(self, db_path: str | Path, *, idle_ttl_seconds: int = 604800,
-                 max_active_rooms: int = 16, max_messages_per_room: int = 1000,
-                 clock: Callable[[], int] = lambda: int(time.time())):
-        if idle_ttl_seconds <= 0:
-            raise ValueError("idle_ttl_seconds must be positive")
-        if max_active_rooms <= 0 or max_messages_per_room <= 0:
-            raise ValueError("room and message capacities must be positive")
+_PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_AGENT = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class ProjectStore:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        idle_ttl_seconds: int = 604800,
+        max_active_projects: int = 16,
+        max_messages_per_project: int = 1000,
+        clock: Callable[[], int] = lambda: int(time.time()),
+    ):
+        if (
+            idle_ttl_seconds <= 0
+            or max_active_projects <= 0
+            or max_messages_per_project <= 0
+        ):
+            raise ValueError(
+                "retention and project/message capacities must be positive"
+            )
         self.db_path = str(db_path)
         self.idle_ttl_seconds = idle_ttl_seconds
-        self.max_active_rooms = max_active_rooms
-        self.max_messages_per_room = max_messages_per_room
+        self.max_active_projects = max_active_projects
+        self.max_messages_per_project = max_messages_per_project
         self.clock = clock
         self._lock = threading.RLock()
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.db_path, timeout=5, check_same_thread=False, isolation_level=None)
+        self.db = sqlite3.connect(
+            self.db_path, timeout=5, check_same_thread=False, isolation_level=None
+        )
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS rooms(
-              room_hash TEXT PRIMARY KEY,
-              created_at INTEGER NOT NULL,
-              last_posted_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS messages(
-              seq INTEGER PRIMARY KEY AUTOINCREMENT,
-              room_hash TEXT NOT NULL REFERENCES rooms(room_hash) ON DELETE CASCADE,
-              client_msg_id TEXT NOT NULL,
-              sender TEXT NOT NULL,
-              recipient TEXT NOT NULL,
-              thread_id TEXT NOT NULL,
-              reply_to INTEGER,
-              hop INTEGER NOT NULL,
-              text TEXT NOT NULL,
-              complete INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL,
-              UNIQUE(room_hash, client_msg_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_hash, seq);
-        """)
-        message_columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
-        if "complete" not in message_columns:
-            self.db.execute("ALTER TABLE messages ADD COLUMN complete INTEGER NOT NULL DEFAULT 0")
+        self._initialize()
 
-    def close(self):
-        with self._lock:
-            self.db.close()
+    def _initialize(self):
+        self.db.executescript("""
+          CREATE TABLE IF NOT EXISTS rooms(room_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_posted_at INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS messages(
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_hash TEXT NOT NULL REFERENCES rooms(room_hash) ON DELETE CASCADE,
+            client_msg_id TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+            thread_id TEXT NOT NULL, reply_to INTEGER, hop INTEGER NOT NULL,
+            text TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            UNIQUE(room_hash, client_msg_id));
+        """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
+        if "complete" not in columns:
+            self.db.execute(
+                "ALTER TABLE messages ADD COLUMN complete INTEGER NOT NULL DEFAULT 0"
+            )
+        if "project_id" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN project_id TEXT")
+        self.db.executescript("""
+          CREATE TABLE IF NOT EXISTS projects(
+            project_id TEXT PRIMARY KEY, room_hash TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS participants(
+            project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL, joined_at INTEGER NOT NULL,
+            PRIMARY KEY(project_id, agent_id));
+          CREATE INDEX IF NOT EXISTS idx_messages_project_seq ON messages(project_id, seq);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_project_client_id ON messages(project_id, client_msg_id) WHERE project_id IS NOT NULL;
+        """)
+        # Existing opaque rooms become projects named by their full, non-secret hash.
+        with self._transaction():
+            for room in self.db.execute(
+                "SELECT room_hash,created_at,last_posted_at FROM rooms"
+            ).fetchall():
+                project_id = room["room_hash"]
+                self.db.execute(
+                    "INSERT OR IGNORE INTO projects VALUES(?,?,?,?)",
+                    (
+                        project_id,
+                        room["room_hash"],
+                        room["created_at"],
+                        room["last_posted_at"],
+                    ),
+                )
+                self.db.execute(
+                    "UPDATE messages SET project_id=? WHERE room_hash=? AND project_id IS NULL",
+                    (project_id, room["room_hash"]),
+                )
 
     @contextlib.contextmanager
-    def _write_transaction(self):
+    def _transaction(self):
         with self._lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -85,101 +122,198 @@ class RoomStore:
                 self.db.rollback()
                 raise
 
-    @staticmethod
-    def _hash(room_id: str) -> str:
-        return hashlib.sha256(room_id.encode("utf-8")).hexdigest()
+    def close(self):
+        with self._lock:
+            self.db.close()
 
-    def _purge_expired(self, now: int):
-        self.db.execute("DELETE FROM rooms WHERE last_posted_at <= ?", (now - self.idle_ttl_seconds,))
+    def _purge_expired(self, now):
+        cutoff = now - self.idle_ttl_seconds
+        expired = self.db.execute(
+            "SELECT project_id FROM projects WHERE last_activity<=?", (cutoff,)
+        ).fetchall()
+        for row in expired:
+            room_hash = self.db.execute(
+                "SELECT room_hash FROM projects WHERE project_id=?", (row[0],)
+            ).fetchone()[0]
+            self.db.execute("DELETE FROM messages WHERE project_id=?", (row[0],))
+            self.db.execute("DELETE FROM participants WHERE project_id=?", (row[0],))
+            self.db.execute("DELETE FROM projects WHERE project_id=?", (row[0],))
+            self.db.execute("DELETE FROM rooms WHERE room_hash=?", (room_hash,))
 
-    def create_room(self) -> str:
+    def _project(self, project_id, now=None):
+        if not isinstance(project_id, str) or not _PROJECT.fullmatch(project_id):
+            raise ValueError(
+                "project must be 1-64 lowercase letters, digits, underscores, or hyphens"
+            )
+        now = self.clock() if now is None else now
+        row = self.db.execute(
+            "SELECT * FROM projects WHERE project_id=? AND last_activity>?",
+            (project_id, now - self.idle_ttl_seconds),
+        ).fetchone()
+        if row is None:
+            raise KeyError
+        return row
+
+    def join(self, project_id: str, agent_id: str) -> bool:
+        if not isinstance(project_id, str) or not _PROJECT.fullmatch(project_id):
+            raise ValueError("invalid project name")
+        if not isinstance(agent_id, str) or not _AGENT.fullmatch(agent_id):
+            raise ValueError("invalid agent name")
         now = self.clock()
-        room_id = secrets.token_urlsafe(32)
-        room_hash = self._hash(room_id)
-        with self._write_transaction():
+        with self._transaction():
             self._purge_expired(now)
-            count = self.db.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
-            if count >= self.max_active_rooms:
-                raise RoomCapacity
-            self.db.execute("INSERT INTO rooms VALUES (?, ?, ?)", (room_hash, now, now))
-        return room_id
+            row = self.db.execute(
+                "SELECT project_id FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            created = row is None
+            if created:
+                count = self.db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+                if count >= self.max_active_projects:
+                    raise ProjectCapacity
+                room_hash = hashlib.sha256(
+                    ("project:" + project_id).encode()
+                ).hexdigest()
+                self.db.execute(
+                    "INSERT INTO rooms VALUES(?,?,?)", (room_hash, now, now)
+                )
+                self.db.execute(
+                    "INSERT INTO projects VALUES(?,?,?,?)",
+                    (project_id, room_hash, now, now),
+                )
+            self.db.execute(
+                "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
+                (project_id, agent_id, now),
+            )
+        return created
 
-    def _room_exists(self, room_hash: str, now: int) -> bool:
-        return self.db.execute("SELECT 1 FROM rooms WHERE room_hash=? AND last_posted_at>?", (room_hash, now - self.idle_ttl_seconds)).fetchone() is not None
-
-    def post(self, room_id: str, payload: dict) -> tuple[dict, bool]:
-        return self._post_to_hash(self._hash(room_id), payload)
-
-    def post_to_room_ref(self, room_ref: str, payload: dict) -> tuple[dict, bool]:
+    def projects(self) -> list[dict]:
         cutoff = self.clock() - self.idle_ttl_seconds
         with self._lock:
-            matches = self.db.execute("SELECT room_hash FROM rooms WHERE substr(room_hash,1,12)=? AND last_posted_at>? LIMIT 2", (room_ref, cutoff)).fetchall()
-        if len(matches) != 1:
-            raise KeyError
-        return self._post_to_hash(matches[0]["room_hash"], payload)
-
-    def _post_to_hash(self, room_hash: str, payload: dict) -> tuple[dict, bool]:
-        payload = dict(payload)
-        payload.setdefault("complete", False)
-        if not isinstance(payload["complete"], bool):
-            raise ValueError("complete must be a boolean")
-        now = self.clock()
-        with self._write_transaction():
-            if not self._room_exists(room_hash, now):
-                raise KeyError
-            existing = self.db.execute("SELECT * FROM messages WHERE room_hash=? AND client_msg_id=?", (room_hash, payload["client_msg_id"])).fetchone()
-            if existing:
-                message = self._message(existing)
-                if any(message[field] != payload[field] for field in payload):
-                    raise Conflict
-                return message, False
-            if payload["reply_to"] is not None and self.db.execute("SELECT 1 FROM messages WHERE room_hash=? AND seq=?", (room_hash, payload["reply_to"])).fetchone() is None:
-                raise ValueError("reply_to must reference a message in this room")
-            count = self.db.execute("SELECT COUNT(*) FROM messages WHERE room_hash=?", (room_hash,)).fetchone()[0]
-            if count >= self.max_messages_per_room:
-                raise MessageCapacity
-            cursor = self.db.execute("""INSERT INTO messages(room_hash,client_msg_id,sender,recipient,thread_id,reply_to,hop,text,complete,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""", (room_hash, payload["client_msg_id"], payload["sender"], payload["recipient"], payload["thread_id"], payload["reply_to"], payload["hop"], payload["text"], int(payload["complete"]), now))
-            self.db.execute("UPDATE rooms SET last_posted_at=? WHERE room_hash=?", (now, room_hash))
-            row = self.db.execute("SELECT * FROM messages WHERE seq=?", (cursor.lastrowid,)).fetchone()
-            return self._message(row), True
-
-    def list_active_rooms(self) -> list[dict]:
-        now = self.clock()
-        cutoff = now - self.idle_ttl_seconds
-        with self._lock:
-            rows = self.db.execute("""SELECT r.room_hash, r.last_posted_at, COUNT(m.seq) AS message_count
-                FROM rooms AS r LEFT JOIN messages AS m ON m.room_hash=r.room_hash
-                WHERE r.last_posted_at>? GROUP BY r.room_hash ORDER BY r.last_posted_at DESC""", (cutoff,)).fetchall()
+            rows = self.db.execute(
+                "SELECT project_id,last_activity FROM projects WHERE last_activity>? ORDER BY project_id",
+                (cutoff,),
+            ).fetchall()
         return [
             {
-                "room_ref": row["room_hash"][:12],
-                "message_count": row["message_count"],
-                "last_activity": datetime.datetime.fromtimestamp(row["last_posted_at"], datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                "project": row["project_id"],
+                "last_activity": self._timestamp(row["last_activity"]),
             }
             for row in rows
         ]
 
-    def read_active_messages(self, *, after: int, limit: int) -> tuple[list[dict], int]:
+    def participants(self, project_id: str) -> list[dict]:
         now = self.clock()
-        cutoff = now - self.idle_ttl_seconds
         with self._lock:
-            rows = self.db.execute("""SELECT m.*, r.room_hash AS active_room_hash
-                FROM messages AS m JOIN rooms AS r ON r.room_hash=m.room_hash
-                WHERE r.last_posted_at>? AND m.seq>? ORDER BY m.seq LIMIT ?""", (cutoff, after, limit)).fetchall()
-        messages = [self._message(row) | {"room_ref": row["active_room_hash"][:12]} for row in rows]
-        return messages, messages[-1]["seq"] if messages else after
+            self._project(project_id, now)
+            rows = self.db.execute(
+                "SELECT agent_id,joined_at FROM participants WHERE project_id=? ORDER BY agent_id",
+                (project_id,),
+            ).fetchall()
+        return [
+            {
+                "agent_id": row["agent_id"],
+                "joined_at": self._timestamp(row["joined_at"]),
+            }
+            for row in rows
+        ]
 
-    def read(self, room_id: str, *, after: int, limit: int) -> tuple[list[dict], int]:
+    def post(self, project_id: str, payload: dict) -> tuple[dict, bool]:
         now = self.clock()
-        room_hash = self._hash(room_id)
+        with self._transaction():
+            project = self._project(project_id, now)
+            payload = dict(payload)
+            payload.setdefault("complete", False)
+            existing = self.db.execute(
+                "SELECT * FROM messages WHERE project_id=? AND client_msg_id=?",
+                (project_id, payload["client_msg_id"]),
+            ).fetchone()
+            if existing:
+                result = self._message(existing)
+                if any(result.get(key) != value for key, value in payload.items()):
+                    raise Conflict
+                return result, False
+            if (
+                payload["reply_to"] is not None
+                and self.db.execute(
+                    "SELECT 1 FROM messages WHERE project_id=? AND seq=?",
+                    (project_id, payload["reply_to"]),
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("reply_to must reference a message in this project")
+            if (
+                self.db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE project_id=?", (project_id,)
+                ).fetchone()[0]
+                >= self.max_messages_per_project
+            ):
+                raise MessageCapacity
+            self.db.execute(
+                "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
+                (project_id, payload["sender"], now),
+            )
+            cursor = self.db.execute(
+                """INSERT INTO messages(room_hash,client_msg_id,sender,recipient,thread_id,reply_to,hop,text,complete,created_at,project_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    project["room_hash"],
+                    payload["client_msg_id"],
+                    payload["sender"],
+                    payload["recipient"],
+                    payload["thread_id"],
+                    payload["reply_to"],
+                    payload["hop"],
+                    payload["text"],
+                    int(payload["complete"]),
+                    now,
+                    project_id,
+                ),
+            )
+            self.db.execute(
+                "UPDATE projects SET last_activity=? WHERE project_id=?",
+                (now, project_id),
+            )
+            self.db.execute(
+                "UPDATE rooms SET last_posted_at=? WHERE room_hash=?",
+                (now, project["room_hash"]),
+            )
+            row = self.db.execute(
+                "SELECT * FROM messages WHERE seq=?", (cursor.lastrowid,)
+            ).fetchone()
+            return self._message(row), True
+
+    def read(
+        self, project_id: str, *, after: int, limit: int
+    ) -> tuple[list[dict], int]:
+        now = self.clock()
         with self._lock:
-            if not self._room_exists(room_hash, now):
-                raise KeyError
-            rows = self.db.execute("SELECT * FROM messages WHERE room_hash=? AND seq>? ORDER BY seq LIMIT ?", (room_hash, after, limit)).fetchall()
+            self._project(project_id, now)
+            rows = self.db.execute(
+                "SELECT * FROM messages WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?",
+                (project_id, after, limit),
+            ).fetchall()
         messages = [self._message(row) for row in rows]
         return messages, messages[-1]["seq"] if messages else after
 
     @staticmethod
-    def _message(row) -> dict:
-        return {"seq": row["seq"], "client_msg_id": row["client_msg_id"], "sender": row["sender"], "recipient": row["recipient"], "thread_id": row["thread_id"], "reply_to": row["reply_to"], "hop": row["hop"], "text": row["text"], "complete": bool(row["complete"]), "created_at": datetime.datetime.fromtimestamp(row["created_at"], datetime.timezone.utc).isoformat().replace("+00:00", "Z")}
+    def _timestamp(value):
+        return (
+            datetime.datetime.fromtimestamp(value, datetime.UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    @classmethod
+    def _message(cls, row):
+        return {
+            "seq": row["seq"],
+            "client_msg_id": row["client_msg_id"],
+            "sender": row["sender"],
+            "recipient": row["recipient"],
+            "thread_id": row["thread_id"],
+            "reply_to": row["reply_to"],
+            "hop": row["hop"],
+            "text": row["text"],
+            "complete": bool(row["complete"]),
+            "created_at": cls._timestamp(row["created_at"]),
+        }

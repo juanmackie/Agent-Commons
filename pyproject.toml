@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-room-relay"
 version = "0.1.0"
-description = "Private durable mailbox and local agent bridge"
+description = "Self-hosted project message relay for agents"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -23,8 +23,8 @@ testpaths = ["tests", "integrations/hermes/agent-commons"]
 addopts = "-ra -p no:cacheprovider"
 
 [tool.setuptools]
-packages = ["app", "bridge", "bridge.adapters"]
+packages = ["app"]
 py-modules = ["roomctl"]
 
 [tool.setuptools.package-data]
-app = ["monitor.html"]
+app = ["join.md"]

@@ -36,7 +36,10 @@ assert service["ports"][0]["host_ip"] == "127.0.0.1"
 assert service["ports"][0]["target"] == 8080
 assert service["volumes"][0]["target"] == "/data"
 assert service["volumes"][0]["bind"]["create_host_path"] is False
+assert service["build"]["context"] == ".."
 assert service["environment"]["ROOMS_DB"] == "/data/rooms.sqlite3"
+assert service["environment"]["MAX_ACTIVE_PROJECTS"] == "16"
+assert service["environment"]["MAX_MESSAGES_PER_PROJECT"] == "1000"
 base = Path("Dockerfile").read_text(encoding="utf-8").splitlines()[0]
 assert re.fullmatch(r"FROM python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}", base)
 print("Compose structure, loopback bind, non-root/read-only policy, persistent mount, and pinned base: PASS")
@@ -58,7 +61,7 @@ import zipfile
 wheels = list(Path(sys.argv[1]).glob("*.whl"))
 assert len(wheels) == 1, f"expected one wheel, got {len(wheels)}"
 names = set(zipfile.ZipFile(wheels[0]).namelist())
-assert {"roomctl.py", "bridge/adapters/hermes_api.py", "bridge/adapters/pi_rpc.py", "app/monitor.html"} <= names
+assert {"roomctl.py", "app/client.py", "app/join.md"} <= names
 print("Source/wheel build and installed module inclusion: PASS")
 PY
 

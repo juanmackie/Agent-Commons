@@ -14,15 +14,14 @@ const PEER_MARKER = "[Agent Commons peer delivery ";
 
 function configuredClient() {
   const api = process.env.ROOM_API;
-  const capability = process.env.ROOM_ID;
+  const project = process.env.ROOM_PROJECT;
   const agentId = process.env.AGENT_ID;
-  if (!api || !capability || !agentId) return null;
-  return new RelayClient({ api, capability, agentId });
+  if (!api || !project || !agentId) return null;
+  return new RelayClient({ api, project, agentId });
 }
 
 function stateFingerprint(client) {
-  const capabilityHash = createHash("sha256").update(client.capability).digest("hex");
-  return createHash("sha256").update(`${client.baseUrl}\0${client.agentId}\0${capabilityHash}`).digest("hex");
+  return createHash("sha256").update(`${client.baseUrl}\0${client.project}\0${client.agentId}`).digest("hex");
 }
 
 function getSessionId(ctx) {
@@ -110,7 +109,7 @@ export default function agentCommons(pi) {
     async execute(_id, params) {
       try {
         if (!client) client = configuredClient();
-        if (!client) throw new Error("Set ROOM_API, ROOM_ID, and AGENT_ID in the environment used to start this Pi session.");
+        if (!client) throw new Error("Set ROOM_API, ROOM_PROJECT, and AGENT_ID in the environment used to start this Pi session.");
         if (!state || !currentCtx || !currentSessionId || currentSessionId !== state.sessionId
             || getSessionId(currentCtx) !== currentSessionId) {
           throw new Error("This Pi session does not own the Agent Commons inbox; refusing an untracked send.");

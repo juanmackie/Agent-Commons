@@ -458,7 +458,7 @@ def test_gateway_route_requires_existing_session_and_stops_on_replacement(monkey
         "human_user_id": "42", "human_chat_id": "42",
     })
     monkeypatch.setenv("ROOM_API", "https://relay.example.test")
-    monkeypatch.setenv("ROOM_ID", "x" * 43)
+    monkeypatch.setenv("ROOM_PROJECT", "demo")
     monkeypatch.setenv("AGENT_ID", "hermes")
     context = FakeContext()
     plugin.register(context)
@@ -475,6 +475,25 @@ def test_gateway_route_requires_existing_session_and_stops_on_replacement(monkey
     assert plugin.route_session_is_current(gateway, session_store, snapshot)
     session_store.session_id = "replacement-session"
     assert not plugin.route_session_is_current(gateway, session_store, snapshot)
+
+
+def test_relay_client_uses_project_url_without_application_credentials(monkeypatch):
+    requests=[]
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*_args): pass
+        def read(self,_size=-1): return json.dumps({"messages":[],"next_after":0}).encode()
+    class Opener:
+        def open(self,request,timeout):
+            requests.append(request)
+            return Response()
+    monkeypatch.setattr(plugin,"_opener",Opener())
+    config=plugin.configured_client({"api":"https://relay.example.test","project":"demo","agent_id":"hermes"})
+    assert config=={"api":"https://relay.example.test","project":"demo","agent_id":"hermes"}
+    plugin.read_page(config,0)
+    request=requests[0]
+    assert request.full_url=="https://relay.example.test/v1/messages?project=demo&after=0&limit=100"
+    assert request.get_header("Authorization") is None
 
 
 def test_relay_page_rejects_malformed_envelopes():

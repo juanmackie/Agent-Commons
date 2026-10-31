@@ -1,34 +1,17 @@
-# Local discovery and go/no-go
+# Product and environment discovery
 
-**Checked:** 2026-10-31 (Australia/Brisbane)
+## Product decision
 
-## Scope and decision
+Agent Commons is one self-hosted Docker message relay. Agents connect from their own machines through a Tailscale HTTPS URL. The service uses FastAPI and SQLite; Pi and Hermes integrations run within their existing sessions and poll for new messages. There are no accounts, passwords, bearer tokens, or central agent workers. See [product contract](product.md).
 
-Proceed with the smallest self-hosted SQLite mailbox implementation for local development. The user explicitly requested implementation, and this workspace contains only the revised plan (no existing service or repository). There is no evidence here that ntfy plus existing listeners meets durable replay, idempotency, and bridge acceptance criteria, so that alternative cannot be certified as a stop-build solution. This is a local build decision, not deployment approval.
+The Tailscale network policy is the only access boundary. Any device that can reach the relay can read messages, join projects, and impersonate labels. The service is not suitable for an untrusted or public network.
 
-## Observed environment
+## Repository evidence
 
-- At initial inspection, the workspace contained `agent-room-relay-revised-plan.md` only and Git did not recognize the directory as a worktree. On continuation, the current directory now reports `main` tracking `origin/main`; treat that checkout and its current uncommitted edits as authoritative.
-- `python` on PATH is 3.11.15; `uv` is 0.11.28. Python 3.12.13 is also installed, and pytest, FastAPI, Uvicorn, and httpx import under that interpreter.
-- Docker CLI is not installed in this execution environment.
-- Hermes Agent: 0.18.2, local Python 3.11.15. Read-only `hermes status` and `hermes gateway status` report no gateway process (stopped), no usable provider login, and the configured terminal backend as `local`. No `.env`, auth file, or configuration secrets were read. A local API endpoint is therefore not currently available to verify.
-- Pi CLI: 1.4.0. Its help and installed `docs/rpc.md` / `docs/rpc-commands.md` confirm JSONL RPC, `agent_settled`, and `get_last_assistant_text`; the source package documents `--session-id` and `--session-dir`. The adapter uses these documented options with tools, MCP, extensions, and project context files disabled. Tests exercise the protocol with a fake child process. No Pi model invocation was made. The help command emitted a settings-lock EPERM warning; no settings change was requested or verified.
-- Hermes Agent: local source for v0.18.2 documents authenticated `/v1/responses` and `/v1/toolsets`. `/v1/responses` supports `Idempotency-Key` through an in-memory cache with a 300-second TTL; `/v1/runs` does not. The installed default API toolset includes terminal, file write/patch, browser, code execution, skills, delegation, and other host actions. The adapter now checks every reported toolset is disabled and refuses startup without the explicit local `HERMES_API_TOOLSETS_VERIFIED=none` acknowledgment. The `/v1/toolsets` response does not expose the `no_mcp` sentinel, so an operator must verify that configuration and the API bind address independently. No API request or model call was made; gateway remains stopped and no provider login is available.
+The codebase includes a single-service Compose template, persistent `/data` mount, local API/CLI, and native Pi/Hermes session integrations. Local verification exercises project-addressed messages and a real loopback HTTP path. SQLite migration keeps existing message rows and maps old room hash prefixes to project labels.
 
-## Not inspected / deployment gate remains closed
+## Unknown host facts
 
-No TrueNAS host, app inventory, ports, datasets, loopback binding, network namespace, Hermes API configuration/key availability, or cross-machine connectivity was inspected. Read-only Tailscale status on this Windows workstation shows the client is running and online, with four peers; local Serve status reports one web port, one TCP entry, one handler, and Funnel disabled. Names and addresses were not recorded. This does not identify the TrueNAS host or establish route reachability. Read-only `hermes status` and `hermes gateway status` report that no gateway process is running; no local API URL/key was tested. No claim is made that any prior host, port, route, or dataset exists. No Hermes/Pi API or RPC request was made, no daemon was installed, and no production settings or secrets were read or changed. Docker deployment and the real cross-machine demonstration are therefore not verified.
+No host values in earlier planning are treated as current. Before deployment, inspect the actual Docker host, its current applications and ports, persistent dataset permissions, Docker networking, installed Tailscale version and Serve routes, tailnet policies, and available HTTPS identity. Also verify the exact Hermes/Pi versions and existing active-session routes. The operator must explicitly authorize any container deployment or Serve route change. Do not expose the relay or use Funnel before that gate.
 
-Before deployment, an operator with approved access must re-inspect TrueNAS and Tailscale live, verify Hermes local API and Pi RPC behavior against the installed versions, evaluate actual tailnet reachability, and obtain the separate M7 approval described in the plan. No route or app should be mutated before that gate.
-
-## Rationale / risks
-
-The selected implementation keeps the relay as a mailbox (SQLite/FastAPI) and keeps model execution local to each agent-side bridge. The room capability is a bearer secret; room membership does not authenticate sender labels. Bridge invocation is at-least-once, not exactly-once. The relay has not been exposed on any network.
-
-## Current continuation checkpoint
-
-- Source of truth: `main` at `42643ba` tracking `origin/main`; the current implementation and handoff edits are uncommitted local work. Preserve the pre-existing user documentation edits. The `.pi/` goal state is runtime data and must not be staged. No background jobs or delegated writers are active.
-- Implemented locally: the existing relay and Pi bridge plus a Hermes local `/v1/responses` adapter, toolset checks and explicit local acknowledgment gate, stable per-thread Hermes conversations, request idempotency with a persisted 240-second retry cutoff, a strict agent JSON reply protocol, persisted thread completion, and backwards-compatible database migrations. Packaging includes a `uv.lock`, hash-pinned runtime requirements, a Python base-image index digest, a loopback-only TrueNAS Compose template, and a dedicated Hermes-agent handoff. The five-step Musk method is captured in that handoff: question, delete, simplify, accelerate feedback, and automate only proven flows.
-- Evidence: `bash verification/run.sh` passed at 2026-10-31T05:16:22Z; it runs frozen sync/lock, 48 tests on Python 3.12.13, static Compose security assertions, source/wheel build, and wheel module inclusion. Evidence: `verification/evidence/local-20261031T051622Z.txt`. The same 48 tests passed on Python 3.11.15 with four third-party warnings. Tests cover real two-client loopback HTTP, bridge restart/outbox recovery, Hermes fake-API Responses/idempotency, retry-window expiry, migrations, and completion. Docker image/container, live agent calls, and actual TrueNAS checks remain unverified.
-- Review/audit: the first independent review found a retry-deadline race; the worker now caps adapter timeout to the persisted remaining window, and the Hermes adapter checks the deadline before POST. A fake-clock test verifies no POST after expiry. Follow-up read-only review found no new actionable issue. The independent goal auditor rejected completion because real Hermes↔Pi collaboration, container lifecycle, and live TrueNAS/Tailscale acceptance remain unverified. User scope forbids deployment; do not claim completion while those required gates remain open.
-- Next/external gates: run the Docker image and disposable-container lifecycle test on a supported Linux host; configure and verify Hermes API with zero tools/MCP; run live Hermes and Pi model calls and the two-direction, multi-turn conversation; inspect TrueNAS/Tailscale and secure exact approval before deployment. No host, route, secret, or daemon was changed.
+Docker, active-session delivery, and second-device Tailscale acceptance remain unverified in this environment.

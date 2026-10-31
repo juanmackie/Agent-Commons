@@ -2,14 +2,14 @@ import { randomUUID } from "node:crypto";
 
 const MAX_TEXT_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const ROOM_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
+const PROJECT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const LABEL = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class RelayError extends Error {}
 
 export class RelayClient {
-  constructor({ api, capability, agentId, fetchImpl = fetch }) {
+  constructor({ api, project, agentId, fetchImpl = fetch }) {
     const endpoint = new URL(api);
     if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/") {
       throw new TypeError("relay API URL must not include credentials, path, query, or fragment");
@@ -17,10 +17,10 @@ export class RelayClient {
     if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname))) {
       throw new TypeError("relay API must use HTTPS, or HTTP on loopback");
     }
-    if (!ROOM_CAPABILITY.test(capability)) throw new TypeError("room capability must be a 256-bit URL-safe token");
-    if (!LABEL.test(agentId)) throw new TypeError("agent ID must contain 1-64 letters, digits, underscores, or hyphens");
+    if (!PROJECT.test(project)) throw new TypeError("invalid project name");
+    if (!LABEL.test(agentId)) throw new TypeError("invalid agent name");
     this.baseUrl = endpoint.origin;
-    this.capability = capability;
+    this.project = project;
     this.agentId = agentId;
     this.fetch = fetchImpl;
   }
@@ -32,20 +32,14 @@ export class RelayClient {
         ...options,
         redirect: "error",
         signal: AbortSignal.timeout(10_000),
-        headers: {
-          Authorization: `Bearer ${this.capability}`,
-          "Content-Type": "application/json",
-          ...options.headers,
-        },
+        headers: { "Content-Type": "application/json", ...options.headers },
       });
     } catch (error) {
       throw new RelayError(`relay unavailable (${error?.name || "Error"})`);
     }
     if (!response.ok) throw new RelayError(`relay returned HTTP ${response.status}`);
     const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-      throw new RelayError("relay response exceeded 2 MiB");
-    }
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) throw new RelayError("relay response exceeded 2 MiB");
     const reader = response.body?.getReader();
     if (!reader) throw new RelayError("relay returned an empty response");
     const chunks = [];
@@ -60,21 +54,17 @@ export class RelayClient {
       }
       chunks.push(Buffer.from(value));
     }
-    try {
-      return JSON.parse(Buffer.concat(chunks, length).toString("utf8"));
-    } catch {
-      throw new RelayError("relay returned invalid JSON");
-    }
+    try { return JSON.parse(Buffer.concat(chunks, length).toString("utf8")); }
+    catch { throw new RelayError("relay returned invalid JSON"); }
   }
+
 
   async read(after) {
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("relay cursor must be a non-negative safe integer");
-    const query = new URLSearchParams({ after: String(after), limit: "100" });
+    const query = new URLSearchParams({ project: this.project, after: String(after), limit: "100" });
     const result = await this.#request(`/v1/messages?${query}`);
     if (!result || !Array.isArray(result.messages) || result.messages.length > 100
-      || !Number.isSafeInteger(result.next_after) || result.next_after < after) {
-      throw new RelayError("relay returned an invalid message page");
-    }
+      || !Number.isSafeInteger(result.next_after) || result.next_after < after) throw new RelayError("relay returned an invalid message page");
     let previousSeq = after;
     for (const message of result.messages) {
       if (!message || typeof message !== "object" || Array.isArray(message)
@@ -82,13 +72,11 @@ export class RelayClient {
         || typeof message.recipient !== "string" || !LABEL.test(message.recipient)
         || typeof message.thread_id !== "string" || !UUID.test(message.thread_id)
         || typeof message.client_msg_id !== "string" || !UUID.test(message.client_msg_id)
-        || !Number.isSafeInteger(message.seq) || message.seq <= previousSeq
-        || message.seq > result.next_after
+        || !Number.isSafeInteger(message.seq) || message.seq <= previousSeq || message.seq > result.next_after
         || !(message.reply_to === null || (Number.isSafeInteger(message.reply_to) && message.reply_to >= 0))
         || !Number.isInteger(message.hop) || message.hop < 0 || message.hop > 8
-        || typeof message.text !== "string" || message.text.trim().length === 0
-        || Buffer.byteLength(message.text, "utf8") > MAX_TEXT_BYTES
-        || typeof message.complete !== "boolean") {
+        || typeof message.text !== "string" || !message.text.trim()
+        || Buffer.byteLength(message.text, "utf8") > MAX_TEXT_BYTES || typeof message.complete !== "boolean") {
         throw new RelayError("relay returned an invalid message");
       }
       previousSeq = message.seq;
@@ -97,31 +85,18 @@ export class RelayClient {
   }
 
   async send({ recipient, threadId, clientMessageId = randomUUID(), text, replyTo = null, hop = 0, complete = false }) {
-    if (!LABEL.test(recipient)) throw new TypeError("recipient must contain 1-64 letters, digits, underscores, or hyphens");
-    if (!UUID.test(threadId)) throw new TypeError("thread ID must be a UUID");
-    if (!UUID.test(clientMessageId)) throw new TypeError("client message ID must be a UUID");
+    if (!LABEL.test(recipient)) throw new TypeError("invalid recipient name");
+    if (!UUID.test(threadId) || !UUID.test(clientMessageId)) throw new TypeError("thread and client message IDs must be UUIDs");
     if (typeof text !== "string" || !text.trim()) throw new TypeError("message must be non-empty text");
     if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) throw new TypeError("message exceeds 16 KiB UTF-8 limit");
-    if (replyTo !== null && (!Number.isSafeInteger(replyTo) || replyTo < 0)) throw new TypeError("reply sequence must be a non-negative safe integer");
-    if (!Number.isInteger(hop) || hop < 0 || hop > 8) throw new TypeError("hop must be an integer between 0 and 8");
-    if (typeof complete !== "boolean") throw new TypeError("complete must be a boolean");
-
-    const receipt = await this.#request("/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({
-        client_msg_id: clientMessageId,
-        sender: this.agentId,
-        recipient,
-        thread_id: threadId,
-        reply_to: replyTo,
-        hop,
-        text,
-        complete,
-      }),
-    });
-    if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) {
-      throw new RelayError("relay returned an invalid send receipt");
-    }
+    if (replyTo !== null && (!Number.isSafeInteger(replyTo) || replyTo < 0)) throw new TypeError("reply sequence must be non-negative");
+    if (!Number.isInteger(hop) || hop < 0 || hop > 8 || typeof complete !== "boolean") throw new TypeError("invalid reply controls");
+    const query = new URLSearchParams({ project: this.project });
+    const receipt = await this.#request(`/v1/messages?${query}`, { method: "POST", body: JSON.stringify({
+      client_msg_id: clientMessageId, sender: this.agentId, recipient, thread_id: threadId,
+      reply_to: replyTo, hop, text, complete,
+    }) });
+    if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) throw new RelayError("relay returned an invalid send receipt");
     return receipt;
   }
 }

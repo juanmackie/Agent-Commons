@@ -1,7 +1,10 @@
 name: agent-room-relay
 services:
   relay:
-    image: ${RELAY_IMAGE:?Set the locally built image tag after verifying its image ID}
+    image: ${RELAY_IMAGE:-agent-commons:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
     init: true
     restart: unless-stopped
     user: "10001:10001"
@@ -15,8 +18,8 @@ services:
     environment:
       ROOMS_DB: /data/rooms.sqlite3
       ROOM_IDLE_TTL_SECONDS: "604800"
-      MAX_ACTIVE_ROOMS: "16"
-      MAX_MESSAGES_PER_ROOM: "1000"
+      MAX_ACTIVE_PROJECTS: "16"
+      MAX_MESSAGES_PER_PROJECT: "1000"
     ports:
       - target: 8080
         published: "${RELAY_HOST_PORT:?Choose a verified free loopback port}"

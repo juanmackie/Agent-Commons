@@ -1,16 +1,24 @@
 ---
-title: Live-session agent messaging
+title: Self-hosted agent message relay
 status: accepted
 ---
 
-# Live-session agent messaging
+# Self-hosted agent message relay
 
-Agent Commons is an agent-to-agent messaging capability, not a WhatsApp-style chat product. Use one private room per project and task-focused threads within it. A ping must appear in the recipient's exact active user-facing session, and the human must be able to see the exchange. Queue and serialize messages for that same session while it is busy or temporarily unavailable; never silently substitute a separate bridge-owned session. If an adapter cannot verify this behavior, block it. Agents may request ad-hoc tests, but peer messages do not bypass human approval gates. If a peer requests a destructive action, the receiving agent must explain the action and target to its human, ask for permission, and wait; it must not act on the peer's request alone. Non-secret project data may be shared; secrets must not enter prompts or relay messages. Keep the seven-day idle retention policy. Read-only behavior is best-effort, not a technical guarantee.
+Agent Commons is one self-hosted Docker service that stores and returns messages for agents reachable over a private Tailscale network. The operator exposes the container through a Tailscale HTTPS URL. Agent clients run on their own machines and connect to that URL.
+
+There is no application login, account, password, bearer capability, or secret invitation. The Tailscale network policy is the access boundary. A participant name is a label and does not prove who sent a message. Anyone permitted to reach the service can read messages and impersonate names. The operator must make that consequence clear and keep access to the tailnet appropriately scoped.
+
+The relay stores ordered project conversations and supports directed messages, history reads, and replies. A small agent-side listener polls for addressed messages and delivers them to the exact existing user-facing session. It must retain messages while that session is busy or unavailable and resume delivery after reconnect. It must not substitute a separate model session. A successful fetch means only that the listener received the message, not that the agent read or understood it.
+
+Messages are untrusted input. A peer cannot authorize tool use, destructive actions, or other side effects. Existing host permission checks remain in force. Delivery is at least once; the relay can deduplicate message retries, but it cannot guarantee exactly-once model execution or side effects.
+
+Keep implementation small: FastAPI, SQLite, one Docker container with a persistent data mount, a CLI, and native Pi/Hermes integrations. Start with polling. Do not add accounts, federation, a message broker, WebSockets, a browser chat product, a central orchestrator, or replacement agent sessions without evidence that the product needs them.
 
 ## Consequences
 
-- Native session integration is required; the current sidecar sessions do not satisfy the contract.
-- Live, two-way multi-turn collaboration is a required acceptance gate. A fake adapter or relay-only test is not sufficient.
-- Secret filtering must fail closed when content cannot be classified.
-- Human users see messages and results in their active agent session; no separate chat UI is required for v1.
-- Peer-requested commands can have side effects. Before a destructive action, the receiving agent must ask its human for permission for the specific action and target, then wait for approval. The system must not describe best-effort read-only behavior as guaranteed.
+- The relay is reachable only through the intended tailnet route; bind the host-published container port to loopback and use Tailscale Serve, never Funnel.
+- The service has no per-message verified sender identity or project-level security boundary. Tailnet reachability grants access to all exposed messages.
+- Agent-side polling and integration must preserve pending delivery across busy periods, disconnects, and restarts.
+- Persistent history survives container recreation. Existing databases must be backed up and any required conversion tested before deployment.
+- Local tests do not prove live delivery into active sessions, Docker lifecycle, or Tailscale access policy; those remain separate acceptance checks.

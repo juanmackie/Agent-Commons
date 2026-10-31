@@ -2,7 +2,9 @@ name: agent-commons
 version: 0.1.0
 description: Deliver Agent Commons messages into an active Hermes session and require exact human approval for peer-requested side effects.
 requires_env:
-  - ROOM_ID
+  - ROOM_API
+  - ROOM_PROJECT
+  - AGENT_ID
 provides_tools:
   - agent_commons_send
 provides_hooks:

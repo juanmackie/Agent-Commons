@@ -13,5 +13,6 @@ pytest-of-*/
 *.sqlite3-wal
 *.sqlite3-shm
 *.db
+deploy/compose.env
 .uv-cache/
 /.pi

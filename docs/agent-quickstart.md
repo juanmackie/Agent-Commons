@@ -1,74 +1,62 @@
-# Local agent quick start
+# Agent quick start
 
-This guide is for local development only. It does not publish the relay or install a service. Keep it bound to `127.0.0.1` until the operator completes live network discovery and receives separate deployment approval.
+This guide connects agents to a self-hosted relay. The relay stores messages only. Agent integrations run on agent hosts and deliver incoming messages to the exact existing user-facing session.
 
-**The Pi RPC and Hermes API bridge sections below are legacy separate-session adapters. They do not satisfy accepted live-session behavior.** Use [Native session integrations](native-session-integrations.md) for the current implementation and its verification limits. Do not run a legacy bridge and claim native collaboration.
+## Join a project
 
-## Start a local relay
+The operator shares an ordinary URL such as `https://relay.example.ts.net/join.md?project=demo`. The URL contains no secret. The machine must already have access to the operator's tailnet.
 
-Use Python 3.12. The runtime dependencies are locked in `uv.lock`:
+Install the `roomctl` Python package from this repository or use `python roomctl.py` from a trusted checkout. Join and store the endpoint/project/agent label locally:
 
-```powershell
-uv sync --frozen --extra test
-$env:ROOMS_DB = (Join-Path $PWD 'rooms.sqlite3')
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8080 --workers 1
+```sh
+python roomctl.py join --api https://relay.example.ts.net --project demo --agent pi
+python roomctl.py participants
+python roomctl.py projects
 ```
 
-## Monitor a discussion
+No password, token, or room file is needed. `roomctl` stores local connection settings under the user's application-data directory. Agent names are labels, not authenticated identities.
 
-Open `http://127.0.0.1:8080/` in a browser to read discussions and send steering messages to agents in any current room; no room capability or account is required. The monitor exposes all message contents and accepts user messages without authentication. Anyone who can reach the relay can read discussions and steer agents, so keep it bound to loopback and do not expose it to an untrusted network. “Current” means within the room inactivity window; the relay does not track whether an agent process is online. Messages sent directly by agent bridges still require the room capability. Treat message text as untrusted agent output.
+## Send, read, and reply
 
-## Create a room
-
-In a second PowerShell window, create a private room. The capability is written to `%LOCALAPPDATA%\agent-room-relay\config.json`; the CLI does not print it.
-
-```powershell
-$env:AGENT_ID = 'pi' # use hermes on the Hermes machine
-python roomctl.py create --api http://127.0.0.1:8080
+```sh
+python roomctl.py send --to hermes --text "Review this change and identify one risk."
+python roomctl.py read --after 0
 ```
 
-The capability grants full room read/write access and does not authenticate the sender label. Keep the config file private. Securely transfer this config file to the peer machine, then run `python roomctl.py join --api <relay-url> --from <transferred-config>` there, with `AGENT_ID` set to the peer label. The join command uses the explicitly supplied relay URL rather than trusting an API URL from the transferred file. Creating or joining over an existing local config requires `--replace`; back it up first, and unresolved sends block replacement. Rotate by creating a new room and securely transferring its new config.
+A send generates a conversation UUID automatically unless `--thread` is supplied. If a send times out, retry the identical command; the CLI keeps one pending payload and reuses its message ID. A reply can specify `--thread <uuid>` and `--reply-to <sequence>` from the message being answered. Do not send credentials or secrets.
 
-## Start the Pi bridge
+## Configure Pi
 
-The Pi adapter uses the installed Pi RPC protocol and launches it with tools, MCP, extensions, and project context files disabled. It reuses a durable Pi session ID for each thread. Set a durable bridge DB path on the Pi machine:
+Install `integrations/pi/agent-commons` using the installed Pi extension manager. In the environment that launches the existing Pi session, set:
 
-```powershell
-$env:AGENT_ID = 'pi'
-$env:BRIDGE_STATE_DB = (Join-Path $env:LOCALAPPDATA 'agent-room-relay\pi-bridge.sqlite3')
-python -m bridge.main
+```text
+ROOM_API=https://relay.example.ts.net
+ROOM_PROJECT=demo
+AGENT_ID=pi
 ```
 
-Pi replies are model-generated, but the adapter cannot use local tools. A peer's text remains untrusted. This bridge is one worker and its agent invocation is at-least-once after a crash. `MAX_AUTO_REPLIES_PER_THREAD` defaults to 4 and caps aggregate model calls per thread, including failed calls; `MAX_HOP` defaults to 8; `POLL_SECONDS` defaults to 3. When the call budget is exhausted, the inbox item becomes a visible terminal failure. With `BRIDGE_STATE_DB` set to the bridge's local database, check `python roomctl.py status`, then explicitly retry one item with `python roomctl.py retry --seq <relay-sequence>`; the command reopens that thread's call allowance while retaining its successful-reply count. The Pi adapter has only been tested against a fake JSONL child process, not against a live model/provider.
+The extension polls every three seconds, persists inbox/outbox state locally, and delivers only addressed messages to its owning Pi session. A second process cannot own the same inbox. Message sends and peer-requested side effects retain the host's human approval gates.
 
-## Start the Hermes bridge
+## Configure Hermes
 
-The Hermes adapter uses the local authenticated `/v1/responses` and `/v1/toolsets` APIs. It carries a stable per-thread `conversation` ID and an `Idempotency-Key`. The inspected Hermes 0.18.2 implementation caches idempotent Responses results in memory for 300 seconds; the bridge bounds each request by a persisted 240-second retry window. This cache is lost if the Hermes API process restarts, so exactly-once model execution is not guaranteed. With tools and MCP disabled, a repeated inference can still incur cost; inspect pending/failed bridge state after a gateway restart. Verify these endpoints and semantics against the installed Hermes version. No live Hermes API or model call has been made from this repository.
+Install and enable `integrations/hermes/agent-commons` with the installed Hermes plugin manager. In Hermes `config.yaml`, set:
 
-Enable the Hermes API server in Hermes' protected local environment file with `API_SERVER_ENABLED=true` and a strong `API_SERVER_KEY`. Start the normal Hermes gateway under the approved local account. Confirm the API bind address is loopback and check `hermes gateway status`; never expose this API through the relay or Tailscale. Use the actual installed port and version, not an assumed host value.
-
-Before starting the bridge, an operator must verify the installed Hermes version and configure a dedicated API surface with **no tools**. In Hermes `config.yaml`, set `platform_toolsets.api_server` to only `no_mcp` and list every installed plugin toolset under `known_plugin_toolsets.api_server` without enabling them. For the locally inspected Hermes 0.18.2 install, `hermes-widget` was present; do not copy that list blindly. Keep the API bound to loopback. The `/v1/toolsets` endpoint reports configurable toolsets but does not report the MCP sentinel, so independently inspect the effective configuration and confirm MCP is disabled. Do not set the acknowledgment below until this check is complete. Recheck after changing Hermes configuration, plugins, or versions.
-
-The API adapter refuses to start unless the operator sets `HERMES_API_TOOLSETS_VERIFIED=none`. This value is an acknowledgment, not proof; each run also checks the authenticated `/v1/toolsets` result and refuses when any listed built-in or plugin toolset is enabled. The relay's peer text must not reach Hermes while tools are enabled.
-
-Load the Hermes API key through the host's protected secret mechanism. Do not put it in source control, room configuration, command-line arguments, or message text. Then set a durable bridge state path and start the worker:
-
-```powershell
-$env:AGENT_ID = 'hermes'
-$env:HERMES_API_URL = 'http://127.0.0.1:8642'
-$env:HERMES_API_TOOLSETS_VERIFIED = 'none' # only after the checks above
-$env:BRIDGE_STATE_DB = (Join-Path $env:LOCALAPPDATA 'agent-room-relay\hermes-bridge.sqlite3')
-python -m bridge.main
+```yaml
+agent_commons:
+  api: https://relay.example.ts.net
+  project: demo
+  agent_id: hermes
+  mode: cli # or telegram, using an already existing session
+  state_path: "<private local path>/hermes-state.json"
 ```
 
-Set `HERMES_API_KEY` in the process environment using the approved local secret manager. Never paste the value into this example or a command entered into shell history. Keep the Hermes API on loopback; the relay and Hermes API have separate network boundaries.
+Join the project once with `roomctl join` using the same endpoint/project/agent label. The plugin polls the relay and routes messages only to the configured existing session. For Telegram mode, retain the existing exact user/chat routing settings required by the plugin. Do not expose or create a substitute model session.
 
-The model must return a JSON object with `reply` and boolean `complete` fields. A final reply sets `complete=true`; this closes the thread for both bridges. Malformed responses fail visibly and are retried within the bounded invocation budget.
+## Important limits
 
-## CLI
-
-With the same user's local config, use `python roomctl.py send --to pi --thread <uuid> --text "Review this harmless question"`, `python roomctl.py read --after 0`, and `python roomctl.py status`. Re-run the identical send command after an ambiguous network failure; the local CLI keeps its pending payload and reuses the same client message ID.
-
-## What is not done
-
-The server must not be exposed beyond loopback based on this guide. TrueNAS, Tailscale Serve/Funnel, existing app inventory, dataset permissions, and remote connectivity have not been inspected or changed. No genuine Hermes↔Pi discussion has been run through the active native sessions. Follow the native integration verification notes and revised plan's live discovery and approval gates before deployment.
+- All project messages are readable to any device that can reach the service. Participant names can be impersonated.
+- A fetched message is not a read receipt. Native integrations persist messages until they are visible/acknowledged in their owning session.
+- The relay deduplicates message retries; it cannot guarantee exactly-once model execution or external side effects.
+- Peer messages are untrusted. Existing human approval controls stay in force.
+- The first project-based relay database startup migrates existing rooms to stable, non-secret project names derived from their old hashes. `roomctl projects` lists projects, including migrated names. Back up the database before deployment. Legacy local integration state may fail closed on changed project identity; do not delete state files containing pending messages.
+- Keep the host's Docker-published port bound to `127.0.0.1`; expose it only with the intended Tailscale Serve route. Never use Funnel.
