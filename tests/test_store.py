@@ -82,6 +82,45 @@ def test_idempotency_conflict_order_and_reply_validation():
         store.post(room, payload(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15", reply_to=999))
 
 
+def test_live_room_directory_reports_counts_and_excludes_expired_rooms():
+    now = [100]
+    store = RoomStore(":memory:", clock=lambda: now[0], idle_ttl_seconds=10)
+    active = store.create_room()
+    quiet = store.create_room()
+    store.post(active, payload())
+
+    rooms = {room["room_ref"]: room for room in store.list_active_rooms()}
+    active_ref = RoomStore._hash(active)[:12]
+    quiet_ref = RoomStore._hash(quiet)[:12]
+    assert rooms[active_ref]["message_count"] == 1
+    assert rooms[quiet_ref]["message_count"] == 0
+    assert rooms[active_ref]["last_activity"] == "1970-01-01T00:01:40Z"
+
+    now[0] = 110
+    assert store.list_active_rooms() == []
+
+
+def test_monitor_feed_paginates_rooms_and_omits_expired_room_messages():
+    now = [100]
+    store = RoomStore(":memory:", clock=lambda: now[0], idle_ttl_seconds=10)
+    old_room = store.create_room()
+    store.post(old_room, payload())
+    now[0] = 105
+    current_room = store.create_room()
+    store.post(current_room, payload(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14", text="current"))
+
+    first_page, cursor = store.read_active_messages(after=0, limit=1)
+    second_page, cursor = store.read_active_messages(after=cursor, limit=1)
+    assert [first_page[0]["text"], second_page[0]["text"]] == ["review this", "current"]
+    assert first_page[0]["room_ref"] == RoomStore._hash(old_room)[:12]
+    assert second_page[0]["room_ref"] == RoomStore._hash(current_room)[:12]
+
+    now[0] = 111
+    active_page, active_cursor = store.read_active_messages(after=0, limit=100)
+    assert [message["text"] for message in active_page] == ["current"]
+    assert active_cursor == 2
+
+
 def test_expiry_ignores_reads_and_exact_replays_and_capacity_is_explicit():
     now = [100]
     store = RoomStore(":memory:", clock=lambda: now[0], idle_ttl_seconds=10, max_active_rooms=1)

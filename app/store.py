@@ -134,6 +134,32 @@ class RoomStore:
             row = self.db.execute("SELECT * FROM messages WHERE seq=?", (cursor.lastrowid,)).fetchone()
             return self._message(row), True
 
+    def list_active_rooms(self) -> list[dict]:
+        now = self.clock()
+        cutoff = now - self.idle_ttl_seconds
+        with self._lock:
+            rows = self.db.execute("""SELECT r.room_hash, r.last_posted_at, COUNT(m.seq) AS message_count
+                FROM rooms AS r LEFT JOIN messages AS m ON m.room_hash=r.room_hash
+                WHERE r.last_posted_at>? GROUP BY r.room_hash ORDER BY r.last_posted_at DESC""", (cutoff,)).fetchall()
+        return [
+            {
+                "room_ref": row["room_hash"][:12],
+                "message_count": row["message_count"],
+                "last_activity": datetime.datetime.fromtimestamp(row["last_posted_at"], datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            for row in rows
+        ]
+
+    def read_active_messages(self, *, after: int, limit: int) -> tuple[list[dict], int]:
+        now = self.clock()
+        cutoff = now - self.idle_ttl_seconds
+        with self._lock:
+            rows = self.db.execute("""SELECT m.*, r.room_hash AS active_room_hash
+                FROM messages AS m JOIN rooms AS r ON r.room_hash=m.room_hash
+                WHERE r.last_posted_at>? AND m.seq>? ORDER BY m.seq LIMIT ?""", (cutoff, after, limit)).fetchall()
+        messages = [self._message(row) | {"room_ref": row["active_room_hash"][:12]} for row in rows]
+        return messages, messages[-1]["seq"] if messages else after
+
     def read(self, room_id: str, *, after: int, limit: int) -> tuple[list[dict], int]:
         now = self.clock()
         room_hash = self._hash(room_id)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 from app.store import Conflict, MessageCapacity, RoomCapacity, RoomStore
@@ -113,9 +113,17 @@ def create_app(db_path: str | Path | None = None, *, store: RoomStore | None = N
             raise HTTPException(status_code=401, detail="invalid room id")
         return room_id
 
+    @app.get("/", include_in_schema=False)
+    def discussion_monitor():
+        return FileResponse(Path(__file__).with_name("monitor.html"), headers={"Cache-Control": "no-store"})
+
     @app.get("/healthz")
     def healthz():
         return {"status": "ok"}
+
+    @app.get("/v1/rooms")
+    def list_rooms():
+        return JSONResponse({"rooms": get_store().list_active_rooms()}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/rooms", status_code=201)
     def create_room():
@@ -123,6 +131,11 @@ def create_app(db_path: str | Path | None = None, *, store: RoomStore | None = N
             return {"room_id": get_store().create_room(), "idle_ttl_seconds": get_store().idle_ttl_seconds}
         except RoomCapacity:
             return JSONResponse({"detail": "room capacity reached", "code": "room_capacity"}, status_code=429)
+
+    @app.get("/v1/monitor/messages")
+    def monitor_messages(after: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100)):
+        messages, next_after = get_store().read_active_messages(after=after, limit=limit)
+        return JSONResponse({"messages": messages, "next_after": next_after}, headers={"Cache-Control": "no-store"})
 
     @app.post("/v1/messages", status_code=201)
     def post_message(message: MessageInput, authorization: str | None = Header(default=None)):

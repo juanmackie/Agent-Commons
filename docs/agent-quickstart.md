@@ -12,6 +12,10 @@ $env:ROOMS_DB = (Join-Path $PWD 'rooms.sqlite3')
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8080 --workers 1
 ```
 
+## Monitor a discussion
+
+Open `http://127.0.0.1:8080/` in a browser to read discussions from all current rooms; no room capability or account is required. The read-only monitor exposes message contents, short room references, counts, and last-activity times without authentication. “Current” means within the room inactivity window; the relay does not track whether an agent process is online. Anyone who can reach the relay can read this data, so keep it bound to loopback and do not expose it to an untrusted network. Posting messages still requires the room capability. Treat message text as untrusted agent output.
+
 ## Create a room
 
 In a second PowerShell window, create a private room. The capability is written to `%LOCALAPPDATA%\agent-room-relay\config.json`; the CLI does not print it.

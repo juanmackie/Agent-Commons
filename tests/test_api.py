@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 
 import httpx
@@ -17,6 +18,72 @@ def client():
         if app.state.store:
             app.state.store.close()
     return app, run, close
+
+
+def test_live_room_directory_is_public_but_does_not_expose_capabilities(client):
+    app, run, close = client
+    async def scenario():
+        async for c in run():
+            capability = (await c.post("/v1/rooms")).json()["room_id"]
+            response = await c.get("/v1/rooms")
+            room = response.json()["rooms"][0]
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            assert room["room_ref"] == hashlib.sha256(capability.encode()).hexdigest()[:12]
+            assert room["message_count"] == 0
+            assert room["last_activity"].endswith("Z")
+            assert capability not in response.text
+            assert set(room) == {"room_ref", "message_count", "last_activity"}
+    try:
+        asyncio.run(scenario())
+    finally:
+        close()
+
+
+def test_discussion_monitor_is_served_without_caching(client):
+    app, run, close = client
+    async def scenario():
+        async for c in run():
+            response = await c.get("/")
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            assert "Room Monitor" in response.text
+            assert "no capability required" in response.text.lower()
+            assert 'name="capability"' not in response.text
+            assert "/v1/monitor/messages" in response.text
+    try:
+        asyncio.run(scenario())
+    finally:
+        close()
+
+
+def test_public_monitor_reads_across_rooms_but_writes_stay_authenticated(client):
+    app, run, close = client
+    async def scenario():
+        async for c in run():
+            first_room = (await c.post("/v1/rooms")).json()["room_id"]
+            second_room = (await c.post("/v1/rooms")).json()["room_id"]
+            message = {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c21", "sender":"pi", "recipient":"hermes", "thread_id":"b3d9dcc7-137c-481f-b268-2a40c7e20c88", "reply_to":None, "hop":0, "text":"first room"}
+            first = await c.post("/v1/messages", headers={"Authorization":f"Bearer {first_room}"}, json=message)
+            second = await c.post("/v1/messages", headers={"Authorization":f"Bearer {second_room}"}, json=message | {"client_msg_id":"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c22", "text":"second room"})
+            assert first.status_code == second.status_code == 201
+
+            page1 = await c.get("/v1/monitor/messages?after=0&limit=1")
+            page2 = await c.get(f"/v1/monitor/messages?after={page1.json()['next_after']}&limit=1")
+            assert page1.status_code == page2.status_code == 200
+            assert page1.headers["cache-control"] == "no-store"
+            assert page1.json()["messages"][0]["text"] == "first room"
+            assert page2.json()["messages"][0]["text"] == "second room"
+            assert page1.json()["messages"][0]["room_ref"] == hashlib.sha256(first_room.encode()).hexdigest()[:12]
+            assert page2.json()["messages"][0]["room_ref"] == hashlib.sha256(second_room.encode()).hexdigest()[:12]
+            assert first_room not in page1.text + page2.text
+            assert second_room not in page1.text + page2.text
+            assert (await c.get("/v1/messages")).status_code == 401
+            assert (await c.post("/v1/messages", json=message)).status_code == 401
+    try:
+        asyncio.run(scenario())
+    finally:
+        close()
 
 
 def test_two_clients_auth_pagination_replay_and_conflict(client):

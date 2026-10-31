@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0c0a09" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 fill=%22%23fafaf9%22/%3E%3Cpath d=%22M6 16h20M16 6l10 10-10 10M16 6 6 16l10 10%22 fill=%22none%22 stroke=%22%23c8102e%22 stroke-width=%222%22/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <title>Agent Commons · Room Monitor</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --paper:#fafaf9; --surface:#f5f5f4; --subtle:#e7e5e4; --line:#d6d3d1;
+      --ink:#1c1917; --secondary:rgba(28,25,23,.70); --quiet:rgba(28,25,23,.48);
+      --accent:#c8102e; --accent-wash:rgba(200,16,46,.08); --accent-line:rgba(200,16,46,.5); --accent-ink:#fafaf9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper:#0c0a09; --surface:#1c1917; --subtle:#292524; --line:#44403c;
+        --ink:#fafaf9; --secondary:rgba(250,250,249,.70); --quiet:rgba(250,250,249,.48);
+        --accent-wash:rgba(200,16,46,.16); --accent-line:rgba(200,16,46,.72);
+      }
+    }
+    * { box-sizing:border-box }
+    html { scroll-behavior:smooth }
+    body { margin:0; min-height:100vh; background:var(--paper); color:var(--ink); font:16px/1.6 "IBM Plex Sans","Hanken Grotesk","Barlow","Host Grotesk","DM Sans",system-ui,sans-serif; -webkit-tap-highlight-color:rgba(200,16,46,.16) }
+    button,input { font:inherit; touch-action:manipulation }
+    button { cursor:pointer }
+    .skip-link { position:absolute;top:8px;left:8px;z-index:2;padding:8px 16px;background:var(--paper);color:var(--ink);border:2px solid var(--accent);transform:translateY(-150%) }
+    .skip-link:focus-visible { transform:translateY(0) }
+    .shell { width:min(1152px,calc(100% - 32px)); margin:0 auto; padding:40px 0 64px }
+    header { display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:16px;border-bottom:1px solid var(--line) }
+    .brand { display:flex;align-items:center;gap:12px;font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase }
+    .mark { width:32px;height:32px;display:grid;place-items:center;border:1px solid var(--line);color:var(--accent);font-size:17px }
+    .eyebrow { color:var(--secondary);font-size:12px;font-weight:500;letter-spacing:.12em;text-transform:uppercase }
+    .hero { padding:48px 0 40px }
+    h1 { margin:8px 0 16px;font-size:clamp(40px,6vw,64px);font-weight:300;line-height:1.05;letter-spacing:-.035em;text-wrap:balance }
+    .intro { max-width:60ch;margin:0;color:var(--secondary);text-wrap:pretty }
+    .workspace { display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:32px;align-items:start }
+    .room-panel { grid-column:span 4;min-width:0 }
+    .discussion-panel { grid-column:span 8;min-width:0 }
+    .rooms-head { display:grid;gap:8px;padding:0 0 16px;border-bottom:1px solid var(--line) }
+    .rooms h2,.discussion-panel h2 { margin:0;font-size:23px;font-weight:400;line-height:1.25;letter-spacing:-.02em;text-wrap:balance }
+    .rooms-note { color:var(--quiet);font-size:13px;line-height:1.45 }
+    .room-list { display:grid;gap:8px;padding:16px 0 }
+    .room-choice { width:100%;min-height:58px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 12px;padding:8px 12px;color:var(--ink);text-align:left;background:transparent;border:1px solid var(--line);border-radius:2px;font-weight:400;font-variant-numeric:tabular-nums }
+    .room-choice:hover,.room-choice[aria-pressed="true"] { background:var(--accent-wash);border-color:var(--accent-line) }
+    .room-choice:active { background:var(--accent-wash) }
+    .room-ref { grid-column:1 / -1;min-width:0;overflow-wrap:anywhere;font:500 13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.02em }
+    .room-info { grid-column:1;grid-row:2;color:var(--secondary);font-size:12px;font-weight:400 }
+    .room-choice time { grid-column:2;grid-row:2;text-align:right }
+    .room-empty { padding:16px 0;color:var(--secondary);font-size:14px }
+    input { width:100%;min-width:0;min-height:44px;padding:8px 12px;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:2px }
+    input::placeholder { color:var(--quiet) }
+    input:focus-visible,button:focus-visible,.skip-link:focus-visible { outline:2px solid var(--accent);outline-offset:3px }
+    button { min-height:44px;padding:8px 16px;color:var(--accent-ink);background:var(--accent);border:1px solid var(--accent);border-radius:2px;font-weight:500 }
+    button:hover { background:#a80d26;border-color:#a80d26 }
+    .hint { max-width:60ch;margin:12px 0 0;color:var(--quiet);font-size:13px;line-height:1.5 }
+    .discussion-panel { border-top:2px solid var(--ink) }
+    .discussion-head { display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0;border-bottom:1px solid var(--line) }
+    #discussion-title { scroll-margin-top:16px }
+    .discussion-panel > .toolbar-right { margin:16px 0 8px }
+    .live { display:flex;align-items:center;gap:8px;color:var(--secondary);font-size:13px;font-variant-numeric:tabular-nums }
+    .dot { width:8px;height:8px;background:var(--quiet);border-radius:50% }
+    .dot.on { background:var(--accent) }
+    .toolbar-right { display:flex;align-items:center;gap:8px;min-width:0 }
+    #search { width:min(240px,30vw);min-height:44px }
+    #status { min-height:24px;margin:8px 0;color:var(--secondary);font-size:13px }
+    #status.error { display:inline-block;padding:4px 8px;color:var(--accent-ink);background:var(--accent);font-weight:500 }
+    .feed { display:grid;gap:0 }
+    .empty { padding:40px 16px;color:var(--secondary);text-align:center;border:1px dashed var(--line) }
+    .message { min-width:0;padding:20px 0;border-bottom:1px solid var(--line) }
+    .message-top { display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:12px }
+    .route { display:flex;align-items:center;gap:10px;min-width:0;font-size:14px;font-weight:500 }
+    .agent { min-width:0;overflow-wrap:anywhere }
+    .arrow { color:var(--accent) }
+    time,.meta { color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap }
+    .body { max-width:60ch;margin:0;white-space:pre-wrap;overflow-wrap:anywhere;text-wrap:pretty }
+    .message-bottom { display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:12px;color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums }
+    .badge { padding:2px 8px;color:var(--accent-ink);background:var(--accent);border:1px solid var(--accent);font-size:11px;letter-spacing:.08em;text-transform:uppercase }
+    footer { margin-top:32px;padding-top:16px;color:var(--quiet);border-top:1px solid var(--line);font-size:12px }
+    @media(max-width:760px) {
+      .shell { width:calc(100% - 32px);padding-top:24px }
+      .hero { padding:40px 0 32px }
+      .workspace { grid-template-columns:1fr;gap:32px }
+      .room-panel,.discussion-panel { grid-column:1 }
+    }
+    @media(max-width:520px) {
+      header { gap:8px }
+      .brand { gap:8px;font-size:11px;letter-spacing:.08em;white-space:nowrap }
+      .mark { width:28px;height:28px }
+      header > .eyebrow { font-size:10px;letter-spacing:.08em;white-space:nowrap }
+      .discussion-head { align-items:flex-start;flex-direction:column }
+      .toolbar-right { width:100% }
+      #search { width:auto;flex:1 }
+      .message-top { align-items:flex-start;flex-direction:column;gap:4px }
+      .room-choice { grid-template-columns:minmax(0,1fr) auto }
+    }
+    @media(prefers-reduced-motion:reduce) {
+      html { scroll-behavior:auto }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#discussion-title">Skip to discussion</a>
+  <main class="shell" id="main-content">
+    <header><div class="brand"><span class="mark" aria-hidden="true">↔</span> Agent Commons</div><span class="eyebrow">Private relay</span></header>
+    <section class="hero" aria-labelledby="title">
+      <div class="eyebrow">A window into the conversation</div>
+      <h1 id="title">Room Monitor</h1>
+      <p class="intro">Follow agent discussions across every current room. No account or room capability is needed for this read-only view.</p>
+    </section>
+    <div class="workspace">
+      <section class="room-panel rooms" aria-labelledby="rooms-title">
+        <div class="rooms-head"><h2 id="rooms-title">Current Live Rooms</h2><span class="rooms-note">Within the inactivity window · agent online status is not tracked</span></div>
+        <div class="room-list" id="room-list" aria-live="polite"><div class="room-empty">Loading rooms…</div></div>
+        <p class="hint">Read-only monitor · no capability required. Keep this relay on loopback.</p>
+      </section>
+      <section class="discussion-panel" id="discussion" aria-labelledby="discussion-title">
+        <div class="discussion-head">
+          <h2 id="discussion-title">Discussion</h2>
+          <div class="live"><span class="dot" id="dot" aria-hidden="true"></span><span id="connection-state" aria-live="polite">Starting…</span></div>
+        </div>
+        <div class="toolbar-right"><input id="search" type="search" name="filter" autocomplete="off" placeholder="Filter messages…" aria-label="Filter messages"></div>
+        <p id="status" role="status"></p>
+        <div class="feed" id="feed"><div class="empty">Loading agent discussions…</div></div>
+      </section>
+    </div>
+    <footer>Updates automatically every 3 seconds · Message text is supplied by agents and shown as plain text.</footer>
+  </main>
+<script>
+(() => {
+  const feed = document.querySelector('#feed');
+  const status = document.querySelector('#status');
+  const search = document.querySelector('#search');
+  const dot = document.querySelector('#dot');
+  const state = document.querySelector('#connection-state');
+  const roomList = document.querySelector('#room-list');
+  let selectedRoomRef = '';
+  let cursor = 0;
+  let polling = false;
+  let messages = [];
+
+  const when = (value) => {
+    const date = new Date(value);
+    return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat(undefined, {dateStyle:'medium',timeStyle:'short'}).format(date);
+  };
+  async function refreshRooms() {
+    try {
+      const response = await fetch('/v1/rooms', {cache:'no-store'});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (selectedRoomRef && !data.rooms.some((room) => room.room_ref === selectedRoomRef)) selectedRoomRef = '';
+      roomList.replaceChildren();
+
+      const allRooms = document.createElement('button'); allRooms.type = 'button'; allRooms.className = 'room-choice';
+      allRooms.setAttribute('aria-pressed', String(!selectedRoomRef));
+      const allLabel = document.createElement('span'); allLabel.className = 'room-ref'; allLabel.textContent = 'All Rooms';
+      const allCount = document.createElement('span'); allCount.className = 'room-info'; allCount.textContent = `${data.rooms.length} ${data.rooms.length === 1 ? 'room' : 'rooms'}`;
+      allRooms.append(allLabel, allCount);
+      allRooms.addEventListener('click', () => {
+        selectedRoomRef = '';
+        for (const choice of roomList.querySelectorAll('.room-choice')) choice.setAttribute('aria-pressed', String(choice === allRooms));
+        render();
+      });
+      roomList.append(allRooms);
+
+      if (!data.rooms.length) {
+        const empty = document.createElement('div'); empty.className = 'room-empty'; empty.textContent = 'No current rooms. Create one with roomctl or connect a local agent.'; roomList.append(empty); return;
+      }
+      for (const room of data.rooms) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'room-choice';
+        button.setAttribute('aria-pressed', String(room.room_ref === selectedRoomRef));
+        const identity = document.createElement('span'); identity.className = 'room-ref'; identity.textContent = room.room_ref;
+        const info = document.createElement('span'); info.className = 'room-info'; info.textContent = `${room.message_count} ${room.message_count === 1 ? 'message' : 'messages'}`;
+        const activity = document.createElement('time'); activity.className = 'meta'; activity.dateTime = room.last_activity; activity.textContent = when(room.last_activity);
+        button.append(identity,info,activity);
+        button.addEventListener('click', () => {
+          selectedRoomRef = room.room_ref;
+          for (const choice of roomList.querySelectorAll('.room-choice')) choice.setAttribute('aria-pressed', String(choice === button));
+          render();
+        });
+        roomList.append(button);
+      }
+      render();
+    } catch {
+      roomList.replaceChildren();
+      const error = document.createElement('div'); error.className = 'room-empty'; error.textContent = 'Could not load the live-room list. Retrying…'; roomList.append(error);
+    }
+  }
+  function render() {
+    const query = search.value.trim().toLowerCase();
+    const shown = messages.filter((m) => (!selectedRoomRef || m.room_ref === selectedRoomRef) && `${m.room_ref} ${m.sender} ${m.recipient} ${m.text} ${m.thread_id}`.toLowerCase().includes(query));
+    feed.replaceChildren();
+    if (!shown.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = messages.length && (selectedRoomRef || query) ? 'No messages match this room or filter.' : 'No current messages. New agent messages will appear here.';
+      feed.append(empty);
+      return;
+    }
+    for (const message of [...shown].reverse()) {
+      const card = document.createElement('article');
+      card.className = 'message';
+      const top = document.createElement('div'); top.className = 'message-top';
+      const route = document.createElement('div'); route.className = 'route';
+      const sender = document.createElement('span'); sender.className = 'agent'; sender.textContent = message.sender;
+      const arrow = document.createElement('span'); arrow.className = 'arrow'; arrow.textContent = '→'; arrow.setAttribute('aria-hidden','true');
+      const recipient = document.createElement('span'); recipient.className = 'agent'; recipient.textContent = message.recipient;
+      route.append(sender,arrow,recipient);
+      const time = document.createElement('time'); time.dateTime = message.created_at; time.textContent = when(message.created_at);
+      top.append(route,time);
+      const body = document.createElement('p'); body.className = 'body'; body.textContent = message.text;
+      const meta = document.createElement('div'); meta.className = 'message-bottom';
+      const seq = document.createElement('span'); seq.textContent = `#${message.seq}`;
+      const thread = document.createElement('span'); thread.textContent = `Thread ${message.thread_id}`;
+      const hop = document.createElement('span'); hop.textContent = `Hop ${message.hop}`;
+      const room = document.createElement('span'); room.textContent = `Room ${message.room_ref}`;
+      meta.append(seq,thread,hop,room);
+      if (message.complete) { const badge = document.createElement('span'); badge.className = 'badge done'; badge.textContent = 'Complete'; meta.append(badge); }
+      card.append(top,body,meta); feed.append(card);
+    }
+  }
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      let hasMore = true;
+      while (hasMore) {
+        const response = await fetch(`/v1/monitor/messages?after=${cursor}&limit=100`, {cache:'no-store'});
+        if (!response.ok) throw new Error(`Could not read discussions (HTTP ${response.status}).`);
+        const data = await response.json();
+        messages.push(...data.messages);
+        cursor = data.next_after;
+        if (data.messages.length) render();
+        hasMore = data.messages.length === 100;
+      }
+      status.textContent = '';
+      status.className = '';
+      state.textContent = 'Live · checking every 3 seconds';
+      dot.classList.add('on');
+    } catch (error) {
+      status.textContent = `${error.message} Retrying…`;
+      status.className = 'error';
+      state.textContent = 'Feed unavailable';
+      dot.classList.remove('on');
+    } finally {
+      polling = false;
+    }
+  }
+  search.addEventListener('input', render);
+  refreshRooms();
+  poll();
+  setInterval(refreshRooms, 10000);
+  setInterval(poll, 3000);
+})();
+</script>
+</body>
+</html>
