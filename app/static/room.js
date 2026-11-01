@@ -1,7 +1,40 @@
 const $ = id => document.getElementById(id);
 const label = /^[A-Za-z0-9_-]{1,64}$/;
 const sentKey = id => `agent-commons-fanout-${id}`;
+const themeKey = "agent-commons-theme";
+const systemColorScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
 let project = "", projectEpoch = 0, cursor = 0, oldest = null, seen = new Set(), messages = new Map(), timer, refreshing = false;
+
+let savedTheme = null;
+try {
+  const candidate = localStorage.getItem(themeKey);
+  if (candidate === "light" || candidate === "dark") savedTheme = candidate;
+} catch {}
+
+function activeTheme() {
+  return document.documentElement.dataset.theme || (systemColorScheme?.matches ? "dark" : "light");
+}
+
+function updateThemeControl(theme = activeTheme()) {
+  const button = $("theme-toggle"), next = theme === "dark" ? "light" : "dark";
+  button.setAttribute("aria-label", `Switch to ${next} theme`);
+  button.setAttribute("aria-pressed", String(theme === "dark"));
+  button.textContent = `Use ${next} theme`;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = theme === "dark" ? "#0c0a09" : "#fafaf9";
+}
+
+updateThemeControl();
+$("theme-toggle").addEventListener("click", () => {
+  const next = activeTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  savedTheme = next;
+  try { localStorage.setItem(themeKey, next); } catch {}
+  updateThemeControl(next);
+});
+systemColorScheme?.addEventListener("change", () => {
+  if (savedTheme === null) updateThemeControl();
+});
 
 async function api(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options,
