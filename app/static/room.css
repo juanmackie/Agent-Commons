@@ -325,6 +325,7 @@ h1 {
   min-height: 180px;
   max-height: min(68vh, 760px);
   overflow: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   border-bottom: 1px solid var(--line);
 }

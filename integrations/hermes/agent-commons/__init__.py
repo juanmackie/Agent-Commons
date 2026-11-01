@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import dataclasses
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -40,12 +41,24 @@ _READ_ONLY_TOOLS = {"read_file", "search_files", "find_files"}
 
 
 class RelayError(RuntimeError):
-    pass
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
-def log_poll_failure(error):
-    """Report a retryable poll failure without logging relay data or message text."""
-    _LOG.warning("Agent Commons relay poll failed (%s); retrying", type(error).__name__)
+def poll_retry_delay(failures):
+    """Return bounded exponential backoff, or the normal interval after recovery."""
+    if failures <= 0:
+        return _POLL_SECONDS
+    return min(_POLL_SECONDS * (2 ** min(failures, 5)), 60)
+
+
+def log_poll_failure(error, retry_delay=None):
+    """Report poll status without logging relay data or message text."""
+    if retry_delay is None:
+        _LOG.error("Agent Commons relay poll stopped (%s); check room settings and saved state", type(error).__name__)
+    else:
+        _LOG.warning("Agent Commons relay poll failed (%s); retrying in %ss", type(error).__name__, retry_delay)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -114,9 +127,9 @@ def _request(config, method, path, payload=None):
             raise RelayError("relay response exceeded 2 MiB")
         result = json.loads(data)
     except urllib.error.HTTPError as error:
-        raise RelayError(f"relay returned HTTP {error.code}") from None
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        raise RelayError(f"relay unavailable ({type(error).__name__})") from None
+        raise RelayError(f"relay returned HTTP {error.code}", retryable=error.code == 429 or error.code >= 500) from None
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+        raise RelayError(f"relay unavailable ({type(error).__name__})", retryable=True) from None
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise RelayError("relay returned invalid JSON") from None
     return result
@@ -852,6 +865,8 @@ def register(ctx):
         except OSError:
             config = None
             config_error = "Another Hermes process owns this Agent Commons inbox, or its owner lock needs verified stale-lock recovery."
+    if config is None:
+        _LOG.error("Agent Commons polling disabled: %s", config_error)
     peer_sessions_file = state_file.with_name(state_file.stem + "-peer-sessions.json")
     state = None
     state_lock = threading.RLock()
@@ -1155,6 +1170,7 @@ def register(ctx):
     def _poll_cli():
         if config is None:
             return
+        failures = 0
         while True:
             try:
                 page = read_page(config, ensure_state()["cursor"])
@@ -1166,8 +1182,16 @@ def register(ctx):
                 _deliver_cli_pending()
             except Exception as error:
                 # Never log message content, endpoint URLs, or exception text.
-                log_poll_failure(error)
-            time.sleep(_POLL_SECONDS)
+                if not (isinstance(error, OSError) or isinstance(error, RelayError) and error.retryable):
+                    log_poll_failure(error)
+                    return
+                failures += 1
+                delay = poll_retry_delay(failures)
+                log_poll_failure(error, delay)
+            else:
+                failures = 0
+                delay = _POLL_SECONDS
+            time.sleep(delay)
 
     def _start_cli_poller():
         nonlocal poll_thread
@@ -1298,6 +1322,7 @@ def register(ctx):
                 )
                 if not getattr(result, "success", False):
                     route["queued_ids"].discard(client_msg_id)
+                    _LOG.warning("Agent Commons Telegram delivery was not accepted; retrying")
                     return
                 display_id = getattr(result, "message_id", None)
                 _store_visible_ping(client_msg_id, display_id)
@@ -1328,11 +1353,13 @@ def register(ctx):
                     route["queued_ids"].discard(client_msg_id)
                     return
             await snapshot["adapter"].handle_message(injected)
-        except Exception:
+        except Exception as error:
             route["queued_ids"].discard(client_msg_id)
             # Keep the durable inbox item and never log peer text or relay secrets.
+            log_poll_failure(error, _POLL_SECONDS)
 
     async def _poll_gateway(expected_session_id):
+        failures = 0
         while route.get("session_id") == expected_session_id:
             snapshot = dict(route)
             if not route_session_is_current(snapshot["gateway"], snapshot["session_store"], snapshot):
@@ -1347,10 +1374,18 @@ def register(ctx):
                     await _deliver_gateway_pending(expected_session_id)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                # Keep retrying without logging potentially sensitive message text.
-                pass
-            await asyncio.sleep(_POLL_SECONDS)
+            except Exception as error:
+                # Keep relay data and exception text out of logs and preserve the durable inbox.
+                if not (isinstance(error, OSError) or isinstance(error, RelayError) and error.retryable):
+                    log_poll_failure(error)
+                    return
+                failures += 1
+                delay = poll_retry_delay(failures)
+                log_poll_failure(error, delay)
+            else:
+                failures = 0
+                delay = _POLL_SECONDS
+            await asyncio.sleep(delay)
 
     _async_cursor_lock = asyncio.Lock()
     ctx.register_hook("pre_gateway_dispatch", gateway_route)

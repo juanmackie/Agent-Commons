@@ -1,3 +1,5 @@
+import { isNearBottom, scrollTopAfterPrepend } from "/assets/room-scroll.mjs";
+
 const $ = id => document.getElementById(id);
 const label = /^[A-Za-z0-9_-]{1,64}$/;
 const sentKey = id => `agent-commons-fanout-${id}`;
@@ -84,12 +86,17 @@ async function refresh({ older = false, initial = false } = {}) {
     $("composer").querySelector("button[type=submit]").disabled = select.options.length === 0;
     if (older) {
       const pageMessages = initial ? page.messages : page.messages.slice().reverse();
+      const feed = $("feed"), previousTop = feed.scrollTop, previousHeight = feed.scrollHeight;
       for (const message of pageMessages) render(message, !initial);
+      if (initial) feed.scrollTop = feed.scrollHeight;
+      else feed.scrollTop = scrollTopAfterPrepend(previousTop, previousHeight, feed.scrollHeight);
       cursor = Math.max(cursor, page.next_after);
       oldest = page.messages[0]?.seq ?? oldest;
       $("older").hidden = page.messages.length < 100;
     } else {
+      const feed = $("feed"), follow = isNearBottom(feed), previousCount = messages.size;
       for (const message of page.messages) render(message);
+      if (messages.size > previousCount && follow) feed.scrollTop = feed.scrollHeight;
       cursor = Math.max(cursor, page.next_after);
       if (oldest === null && page.messages.length) oldest = page.messages[0].seq;
     }

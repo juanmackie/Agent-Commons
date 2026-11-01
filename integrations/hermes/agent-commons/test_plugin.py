@@ -418,10 +418,58 @@ def test_cli_injection_requires_the_exact_active_hermes_session():
 
 
 def test_relay_poll_failures_are_actionable_without_logging_relay_data(caplog):
-    plugin.log_poll_failure(plugin.RelayError("https://relay.invalid secret message text"))
-    assert "Agent Commons relay poll failed (RelayError); retrying" in caplog.text
+    plugin.log_poll_failure(plugin.RelayError("https://relay.invalid secret message text", retryable=True), 6)
+    assert "Agent Commons relay poll failed (RelayError); retrying in 6s" in caplog.text
     assert "relay.invalid" not in caplog.text
     assert "secret message text" not in caplog.text
+
+
+def test_permanent_poll_failure_is_reported_without_exposing_error_text(caplog):
+    plugin.log_poll_failure(plugin.RelayError("invalid config with secret value"))
+    assert "Agent Commons relay poll stopped (RelayError)" in caplog.text
+    assert "secret value" not in caplog.text
+
+
+@pytest.mark.parametrize(("status", "retryable"), [(401, False), (429, True), (503, True)])
+def test_http_status_classifies_configuration_and_transient_poll_failures(monkeypatch, status, retryable):
+    import urllib.error
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.HTTPError("https://relay.invalid/private", status, "secret", {}, None)
+
+    monkeypatch.setattr(plugin, "_opener", Opener())
+    with pytest.raises(plugin.RelayError) as failure:
+        plugin._request({"api": "https://relay.invalid"}, "GET", "/healthz")
+    assert failure.value.retryable is retryable
+    assert "secret" not in str(failure.value)
+
+
+def test_truncated_http_response_is_retryable_without_exposing_response_data(monkeypatch):
+    import http.client
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return None
+        def read(self, _limit):
+            raise http.client.IncompleteRead(b"private partial body", 12)
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(plugin, "_opener", Opener())
+    with pytest.raises(plugin.RelayError) as failure:
+        plugin._request({"api": "https://relay.invalid"}, "GET", "/healthz")
+    assert failure.value.retryable
+    assert "private partial body" not in str(failure.value)
+
+
+def test_poll_retry_delay_is_bounded_and_resets_after_success():
+    assert [plugin.poll_retry_delay(failures) for failures in range(1, 6)] == [6, 12, 24, 48, 60]
+    assert plugin.poll_retry_delay(0) == plugin._POLL_SECONDS
 
 
 def test_dashboard_message_uses_exact_existing_session_and_queues_follow_up(monkeypatch):

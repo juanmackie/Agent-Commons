@@ -63,7 +63,7 @@ assert len(wheels) == 1, f"expected one wheel, got {len(wheels)}"
 names = set(zipfile.ZipFile(wheels[0]).namelist())
 assert {
     "roomctl.py", "app/client.py", "app/join.md", "app/agent_setup.md",
-    "app/static/index.html", "app/static/room.js", "app/static/room.css",
+    "app/static/index.html", "app/static/room.js", "app/static/room-scroll.mjs", "app/static/room.css",
 } <= names
 print("Source/wheel build and installed module inclusion: PASS")
 PY

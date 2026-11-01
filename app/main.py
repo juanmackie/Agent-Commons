@@ -174,7 +174,7 @@ def create_app(
 
     @app.get("/assets/{name}", include_in_schema=False)
     def room_asset(name: str):
-        if name not in {"room.js", "room.css"}:
+        if name not in {"room.js", "room-scroll.mjs", "room.css"}:
             raise HTTPException(status_code=404)
         return FileResponse(Path(__file__).with_name("static") / name)
     app.add_middleware(BodyLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)

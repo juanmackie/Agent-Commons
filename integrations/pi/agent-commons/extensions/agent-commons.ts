@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { RelayClient } from "../src/relay.mjs";
+import { IdleWakeReservation } from "../src/idle-wake.mjs";
 import { loadState, saveState } from "../src/state.mjs";
 import { acquireOwnerLock } from "../src/owner-lock.mjs";
 import { gatePeerToolCall, isRoomctlSend, requiresHumanPermission, shouldGateToolCall } from "../src/permission.mjs";
@@ -10,6 +11,7 @@ import { latestPeerContext, parsePeerMarker } from "../src/peer-context.mjs";
 import { acknowledgeOutboundMessage, acknowledgeRelayMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const POLL_MS = 3000;
+const MAX_POLL_MS = 60_000;
 const PEER_MARKER = "[Agent Commons peer delivery ";
 
 function configuredClient() {
@@ -72,6 +74,7 @@ export default function agentCommons(pi) {
   let currentCtx = null;
   let currentSessionId = null;
   let pollTimer = null;
+  let pollFailures = 0;
   let polling = false;
   let stopped = false;
   let client;
@@ -81,6 +84,7 @@ export default function agentCommons(pi) {
   let stateWrite = Promise.resolve();
   let sessionGeneration = 0;
   let releaseOwnerLock = null;
+  const idleWake = new IdleWakeReservation();
 
   function updateState(transform) {
     const write = stateWrite.catch(() => {}).then(async () => {
@@ -185,6 +189,7 @@ export default function agentCommons(pi) {
     if (!state) return;
     const sessionId = getSessionId(ctx);
     if (!sessionId || sessionId !== state.sessionId) return;
+    idleWake.release(sessionId);
     const branch = ctx.sessionManager.getBranch();
     for (const pending of visiblePendingMessages(state, sessionId, (id) => Boolean(latestPeerForMessageId(branch, id)))) {
       const peer = latestPeerForMessageId(branch, pending.client_msg_id);
@@ -236,6 +241,10 @@ export default function agentCommons(pi) {
   async function deliverPending() {
     if (!currentCtx || !currentSessionId || currentSessionId !== state?.sessionId
         || getSessionId(currentCtx) !== currentSessionId) return;
+    const idle = currentCtx.isIdle();
+    const expiredWakeMessageId = idleWake.expire(currentSessionId);
+    if (expiredWakeMessageId) queuedMessageIds.delete(expiredWakeMessageId);
+    if (idleWake.shouldDefer(currentSessionId, idle)) return;
     const message = nextRelayMessage(state, currentSessionId, queuedMessageIds);
     if (!message) return;
     activePeer = {
@@ -265,43 +274,83 @@ export default function agentCommons(pi) {
           },
         }, { triggerTurn: false });
       } else if (message.delivery === "interrupt") {
+        if (idle) idleWake.reserve(currentSessionId, message.client_msg_id);
         pi.sendUserMessage(content, { deliverAs: "steer" });
-      } else if (currentCtx.isIdle()) {
+      } else if (idle) {
+        idleWake.reserve(currentSessionId, message.client_msg_id);
         pi.sendUserMessage(content);
       } else {
         pi.sendUserMessage(content, { deliverAs: "followUp" });
       }
     } catch (error) {
+      if (idle) idleWake.release(currentSessionId);
       queuedMessageIds.delete(message.client_msg_id);
       throw error;
     }
   }
 
+  function schedulePoll(delay, generation) {
+    if (stopped || generation !== sessionGeneration) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => {
+      pollTimer = null;
+      void pollOnce();
+    }, delay);
+  }
+
   async function pollOnce() {
-    if (polling || stopped || !currentCtx || !state || !client
+    if (stopped || !currentCtx || !state || !client
         || !currentSessionId || getSessionId(currentCtx) !== currentSessionId) return;
+    if (polling) {
+      schedulePoll(POLL_MS, sessionGeneration);
+      return;
+    }
     polling = true;
     const generation = sessionGeneration;
+    let outboxFailure = null;
     try {
-      await flushOutbox().catch((error) => currentCtx?.ui.setStatus("agent-commons", `Approved message remains queued: ${error.message}`));
+      await flushOutbox().catch((error) => { outboxFailure = error; });
       const page = await client.read(state.cursor);
       if (generation !== sessionGeneration || stopped) return;
       await persistPage(page);
       if (generation === sessionGeneration && !stopped) {
         await acknowledgeVisibleCompletions();
         await deliverPending();
+        if (outboxFailure) throw outboxFailure;
+        pollFailures = 0;
       }
+    } catch (error) {
+      if (generation !== sessionGeneration || stopped) return;
+      pollFailures = error.retryable ? pollFailures + 1 : 5;
+      const delay = Math.min(POLL_MS * (2 ** Math.min(pollFailures, 5)), MAX_POLL_MS);
+      let failure;
+      if (outboxFailure === error && error.configuration) {
+        failure = `Approved message remains queued; relay configuration rejected (${error.message})`;
+      } else if (outboxFailure === error) {
+        failure = `Approved message remains queued (${error.message})`;
+      } else if (error.configuration) {
+        failure = `Relay configuration rejected (${error.message}); check ROOM_API and room settings`;
+      } else {
+        failure = `Relay unavailable (${error.message})`;
+      }
+      currentCtx?.ui.setStatus("agent-commons", `${failure}; retrying in ${Math.ceil(delay / 1000)}s`);
     } finally {
       polling = false;
+      if (generation === sessionGeneration && !stopped) {
+        const delay = pollFailures === 0 ? POLL_MS : Math.min(POLL_MS * (2 ** Math.min(pollFailures, 5)), MAX_POLL_MS);
+        schedulePoll(delay, generation);
+      }
     }
   }
 
   function stopPolling() {
     stopped = true;
     sessionGeneration += 1;
+    idleWake.release(currentSessionId);
     currentCtx = null;
     currentSessionId = null;
-    if (pollTimer) clearInterval(pollTimer);
+    if (pollTimer) clearTimeout(pollTimer);
+    pollFailures = 0;
     pollTimer = null;
     queuedMessageIds.clear();
   }
@@ -341,10 +390,7 @@ export default function agentCommons(pi) {
       } else {
         ctx.ui.setStatus("agent-commons", "Messages are queued for the original Pi session; resume that session to receive them.");
       }
-      pollTimer = setInterval(() => {
-        void pollOnce().catch((error) => currentCtx?.ui.setStatus("agent-commons", `Relay unavailable: ${error.message}`));
-      }, POLL_MS);
-      void pollOnce().catch((error) => ctx.ui.setStatus("agent-commons", `Relay unavailable: ${error.message}`));
+      void pollOnce();
     } catch (error) {
       relayDisabled = error.message;
       activePeer = { sender: "unknown", thread_id: null, seq: 0, hop: 8, complete: true };

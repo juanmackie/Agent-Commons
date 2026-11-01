@@ -50,7 +50,15 @@ test("malformed envelopes and out-of-order relay messages fail closed",async()=>
 
 test("relay API failures fail closed",async()=>{
   const client=new RelayClient({...config,fetchImpl:async()=>new Response("unavailable",{status:503})});
-  await assert.rejects(client.read(0),/HTTP 503/);
+  await assert.rejects(client.read(0), error => error.message.includes("HTTP 503") && error.retryable && !error.configuration);
+  const rejected=new RelayClient({...config,fetchImpl:async()=>new Response("rejected",{status:401})});
+  await assert.rejects(rejected.read(0), error => error.message.includes("HTTP 401") && !error.retryable && error.configuration);
+});
+
+test("relay response interruptions are classified as retryable without exposing response data", async () => {
+  const body = new ReadableStream({ start(controller) { controller.error(new TypeError("private partial response")); } });
+  const client = new RelayClient({ ...config, fetchImpl: async () => new Response(body) });
+  await assert.rejects(client.read(0), error => error.retryable && !error.message.includes("private partial response"));
 });
 
 test("oversized relay responses are rejected before JSON parsing",async()=>{

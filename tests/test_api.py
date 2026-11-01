@@ -93,7 +93,9 @@ def test_room_console_and_allowlisted_assets_are_served(tmp_path):
         assert 'id="feed"' in page.text
         assert 'src="/assets/room.js"' in page.text
         assert client.get("/assets/room.js").status_code == 200
+        assert client.get("/assets/room-scroll.mjs").status_code == 200
         assert client.get("/assets/room.css").status_code == 200
+        assert client.get("/assets/not-allowlisted.mjs").status_code == 404
         assert client.get("/assets/../main.py").status_code == 404
 
 

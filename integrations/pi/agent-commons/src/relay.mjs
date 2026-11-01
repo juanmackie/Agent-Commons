@@ -6,7 +6,13 @@ const PROJECT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const LABEL = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export class RelayError extends Error {}
+export class RelayError extends Error {
+  constructor(message, { retryable = false, configuration = false } = {}) {
+    super(message);
+    this.retryable = retryable;
+    this.configuration = configuration;
+  }
+}
 
 export class RelayClient {
   constructor({ api, project, agentId, fetchImpl = fetch }) {
@@ -35,24 +41,32 @@ export class RelayClient {
         headers: { "Content-Type": "application/json", ...options.headers },
       });
     } catch (error) {
-      throw new RelayError(`relay unavailable (${error?.name || "Error"})`);
+      throw new RelayError(`relay unavailable (${error?.name || "Error"})`, { retryable: true });
     }
-    if (!response.ok) throw new RelayError(`relay returned HTTP ${response.status}`);
+    if (!response.ok) throw new RelayError(`relay returned HTTP ${response.status}`, {
+      retryable: response.status === 429 || response.status >= 500,
+      configuration: response.status >= 400 && response.status < 500 && response.status !== 429,
+    });
     const declaredLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) throw new RelayError("relay response exceeded 2 MiB");
     const reader = response.body?.getReader();
     if (!reader) throw new RelayError("relay returned an empty response");
     const chunks = [];
     let length = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > MAX_RESPONSE_BYTES) {
-        await reader.cancel();
-        throw new RelayError("relay response exceeded 2 MiB");
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > MAX_RESPONSE_BYTES) {
+          await reader.cancel().catch(() => {});
+          throw new RelayError("relay response exceeded 2 MiB");
+        }
+        chunks.push(Buffer.from(value));
       }
-      chunks.push(Buffer.from(value));
+    } catch (error) {
+      if (error instanceof RelayError) throw error;
+      throw new RelayError(`relay unavailable (${error?.name || "Error"})`, { retryable: true });
     }
     try { return JSON.parse(Buffer.concat(chunks, length).toString("utf8")); }
     catch { throw new RelayError("relay returned invalid JSON"); }
