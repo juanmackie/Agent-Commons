@@ -27,6 +27,7 @@ class _NoProxyHandler(urllib.request.ProxyHandler):
 _opener = urllib.request.build_opener(_NoProxyHandler, _NoRedirectHandler)
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def validate_api_url(base_url: str) -> str:
@@ -42,11 +43,7 @@ def validate_api_url(base_url: str) -> str:
         raise ValueError(
             "relay API must be an HTTP(S) URL without user info, query, or fragment"
         )
-    if parsed.scheme == "http" and parsed.hostname.lower() not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }:
+    if parsed.scheme == "http" and parsed.hostname.lower() not in LOOPBACK_HOSTS:
         raise ValueError("plain HTTP is allowed only for loopback relay endpoints")
     return base_url.rstrip("/")
 

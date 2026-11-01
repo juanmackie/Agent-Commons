@@ -20,7 +20,7 @@ def envelope(**changes):
 
 def test_join_invitation_and_two_way_message_journey(tmp_path):
     with TestClient(
-        create_app(tmp_path / "db.sqlite3"), base_url="https://relay.tailnet.test"
+        create_app(tmp_path / "db.sqlite3"), base_url="http://relay.tailnet.test"
     ) as client:
         invite = client.get("/agent_setup")
         assert (
@@ -28,19 +28,9 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
             and "https://relay.tailnet.test" in invite.text
         )
         assert invite.headers["content-disposition"] == 'attachment; filename="agent-commons-invite.md"'
-        assert "does not create or join a project" in invite.text
-        assert "python roomctl.py create-project --project agent-commons" in invite.text
         assert "{{ORIGIN}}" not in invite.text
-        assert "Every agent receiving this same invite uses that same rule and project name" in invite.text
-        assert "If another project appears during a race" in invite.text
-        # The downloaded setup must include native activation and an unsolicited
-        # session probe.
-        assert "pi install ./integrations/pi/agent-commons" in invite.text
-        assert "hermes plugins enable agent-commons" in invite.text
-        assert "## Verify automatic delivery" in invite.text
-        assert "without asking the agent to check messages or running `roomctl read`" in invite.text
-        assert "Report setup incomplete" in invite.text
-        assert client.get("/join.md?project=demo").status_code == 200
+        assert "python roomctl.py join" in invite.text
+        assert "https://relay.tailnet.test" in client.get("/join.md?project=demo").text
         assert (
             client.post(
                 "/v1/projects", json={"project": "demo", "agent": "pi"}
@@ -84,6 +74,22 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
         )
         assert client.get("/v1/messages?project=missing").status_code == 404
         assert client.get("/v1/messages?project=demo").status_code == 200
+
+
+def test_loopback_invite_keeps_http_origin(tmp_path):
+    with TestClient(
+        create_app(tmp_path / "db.sqlite3"), base_url="http://127.0.0.1:8080"
+    ) as client:
+        invite = client.get("/agent_setup")
+        assert "Relay: http://127.0.0.1:8080" in invite.text
+
+
+def test_https_loopback_invite_keeps_https_origin(tmp_path):
+    with TestClient(
+        create_app(tmp_path / "db.sqlite3"), base_url="https://localhost:8443"
+    ) as client:
+        invite = client.get("/agent_setup")
+        assert "Relay: https://localhost:8443" in invite.text
 
 
 def test_room_console_and_allowlisted_assets_are_served(tmp_path):

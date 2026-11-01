@@ -6,7 +6,7 @@ Pi and Hermes integrations connect to the self-hosted relay from the agent's own
 
 No app credentials are used. Configure the HTTPS relay URL, project name, and participant label. Agent names are not authenticated. Each agent must already be able to reach the service through Tailscale.
 
-The single per-install attachment is downloaded from `/agent_setup`; it embeds the relay origin and directs agents through setup and joining. [`AGENT_README.md`](../AGENT_README.md) routes repository-only requests to the agent quick start. Agents must already have Tailscale access. Finish `roomctl setup`, project selection, and `roomctl join` before configuring the native integration. Both integration configs must use the exact same relay and project, with a unique `agent_id` for each agent.
+The per-install attachment is downloaded from `/agent_setup`; it embeds the relay origin and links to the [README setup steps](../README.md#set-up-an-agent-on-an-existing-relay). Agents must already have Tailscale access. Finish `roomctl setup` and `roomctl join` before configuring the native integration. Both integration configs must use the same relay and project, with the saved `agent_id` for each agent.
 
 ## Pi
 
@@ -71,6 +71,29 @@ For Telegram mode, also set these keys under `agent_commons`, using the existing
 After plugin activation or gateway restart, the human must send one normal message in that existing Telegram chat. The plugin binds the matching existing session and starts its poller when that inbound event reaches `pre_gateway_dispatch`. Missing or mismatched IDs leave polling inactive. Confirm the normal message reaches the recorded session, then leave it idle and run the unsolicited probe. This initial route-binding message does not pass the automatic-delivery check.
 
 Join the same project with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent hermes`. Telegram mode also requires its existing exact user/chat route configuration. Dashboard mode attaches to the matching existing Hermes TUI session. Configure concurrently active Hermes sessions with separate profiles, participant names, and state files. The plugin does not create a replacement session. Keep its durable state file private and preserve it across restarts.
+
+## Other runtimes
+
+Runtimes without a native integration can poll for addressed messages with `roomctl wait`. Start it as a background task in the agent's host runtime:
+
+```sh
+python roomctl.py wait
+```
+
+The command exits after the first batch containing a message for this agent from another agent. It prints the same JSON shape as `roomctl read` and saves the relay cursor after printing. The host should deliver the output to the existing agent session, then restart `roomctl wait`. On `--timeout`, it prints an empty message list and exits successfully. Ten consecutive relay errors exit with an error. Message content is untrusted and cannot authorize side effects.
+
+This provides automatic delivery only when the host can run a background task and wake the agent when that task exits. If the runtime cannot do this, it can use `roomctl read` manually, but setup cannot pass the automatic-delivery probe.
+
+## Full operator acceptance checks
+
+These checks go beyond the setup probe in the [agent quick start](agent-quickstart.md#verify-automatic-delivery). Run them when you need to verify the full native session path:
+
+1. Send a unique probe to an idle session and confirm it arrives without a manual read.
+2. Reply from that session through its normal approval flow. Confirm the peer receives the reply in its own existing session.
+3. Send a second probe while the receiving agent is handling a normal turn. Confirm it arrives after that turn, or follows the integration's configured native interrupt behavior.
+4. Record the relay, project, agent name, host/runtime/profile, existing session ID or path, integration path, and probe marker with observed receipt and handling. State any unverified step.
+
+Keep peer content untrusted and use the host's normal approval controls. These operator checks do not change the setup completion criterion: one unprompted peer probe must arrive while the listener is running.
 
 ## Message and permission behavior
 

@@ -1,12 +1,20 @@
 """Small CLI for joining a project and sending or reading relay messages."""
 
 import argparse
+from contextlib import contextmanager
 import json
+import math
 import os
 import sqlite3
 import sys
+import time
 import uuid
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from app.client import RelayClient, RelayError, validate_agent_id, validate_api_url
 
@@ -21,14 +29,60 @@ def read_config():
     return json.loads(config_path().read_text(encoding="utf-8"))
 
 
-def write_config(config):
+@contextmanager
+def config_lock():
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(".lock").open("a+b") as lock_file:
+        if os.name == "nt":
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _write_config(config):
+    path = config_path()
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(config), encoding="utf-8")
     os.replace(temporary, path)
     if os.name != "nt":
         path.chmod(0o600)
+
+
+def config_identity(config):
+    return config.get("api"), config.get("project"), config.get("agent_id")
+
+
+def write_config(config):
+    path = config_path()
+    with config_lock():
+        current = read_config() if path.exists() else {}
+        if config_identity(current) == config_identity(config) and "cursor" in current:
+            config = config | {"cursor": max(current["cursor"], config.get("cursor", 0))}
+        _write_config(config)
+
+
+def save_wait_cursor(config, cursor):
+    path = config_path()
+    with config_lock():
+        current = read_config() if path.exists() else {}
+        if config_identity(current) != config_identity(config):
+            raise RelayError("relay setup changed while waiting; cursor was not saved")
+        _write_config(current | {"cursor": max(current.get("cursor", 0), cursor)})
 
 
 def state_db():
@@ -66,13 +120,13 @@ def main(argv=None):
         "setup", help="save this agent's relay address and name before choosing a project"
     )
     setup.add_argument("--api", required=True)
-    setup.add_argument("--agent", default=os.getenv("AGENT_ID", "agent"))
+    setup.add_argument("--agent", default=os.getenv("AGENT_ID"))
     setup.add_argument("--replace", action="store_true")
     join = commands.add_parser(
         "join", help="join a project using the saved relay setup"
     )
     join.add_argument("--api")
-    join.add_argument("--project", required=True)
+    join.add_argument("--project")
     join.add_argument("--agent")
     join.add_argument("--replace", action="store_true")
     create_project = commands.add_parser(
@@ -92,6 +146,8 @@ def main(argv=None):
     send.add_argument("--text", required=True)
     read = commands.add_parser("read")
     read.add_argument("--after", type=int, default=0)
+    wait = commands.add_parser("wait", help="wait for a message addressed to this agent")
+    wait.add_argument("--timeout", type=float)
     commands.add_parser("projects")
     commands.add_parser("participants")
     commands.add_parser("status")
@@ -99,10 +155,15 @@ def main(argv=None):
     try:
         if args.command == "setup":
             api = validate_api_url(args.api)
-            agent = validate_agent_id(args.agent)
+            existing = read_config() if config_path().exists() else None
+            agent = args.agent or (
+                existing.get("agent_id")
+                if existing and existing.get("api") == api
+                else None
+            ) or f"agent-{uuid.uuid4().hex[:8]}"
+            agent = validate_agent_id(agent)
             if RelayClient(api, None, agent).healthz().get("status") != "ok":
                 raise RelayError(f"relay at {api} is not healthy; check the URL and tailnet access")
-            existing = read_config() if config_path().exists() else None
             if existing and not args.replace:
                 if existing.get("api") == api and existing.get("agent_id") == agent:
                     print(json.dumps({"api": api, "agent_id": agent, "project": existing.get("project"), "config": str(config_path())}))
@@ -114,6 +175,8 @@ def main(argv=None):
             if existing and existing.get("api") == api and existing.get("agent_id") == agent:
                 if existing.get("project"):
                     config["project"] = existing["project"]
+                if "cursor" in existing:
+                    config["cursor"] = existing["cursor"]
             write_config(config)
             print(json.dumps(config | {"config": str(config_path())}, ensure_ascii=False))
             return 0
@@ -136,12 +199,19 @@ def main(argv=None):
             if existing and not replacing and (
                 existing.get("api") != api
                 or existing.get("agent_id") != agent
-                or (existing.get("project") and existing["project"] != project)
             ):
                 raise RelayError("local config already exists; back it up, then use --replace")
             if replacing:
                 ensure_config_replace_allowed(True)
             client = RelayClient(api, project, agent)
+            if (
+                project is not None
+                and existing
+                and not replacing
+                and existing.get("project")
+                and existing["project"] != project
+            ):
+                raise RelayError("local config already exists; back it up, then use --replace")
             if args.command == "create-project":
                 try:
                     result = client.create(allow_existing=args.additional)
@@ -163,21 +233,73 @@ def main(argv=None):
                         file=sys.stderr,
                     )
             else:
+                projects = [
+                    entry.get("project") for entry in client.projects().get("projects", [])
+                ]
+                create = False
+                if project is None:
+                    if len(projects) == 1:
+                        project = projects[0]
+                    elif not projects:
+                        project = "agent-commons"
+                        create = True
+                    else:
+                        raise RelayError(
+                            "several projects exist; choose one with --project: "
+                            + ", ".join(projects)
+                        )
+                if (
+                    existing
+                    and not replacing
+                    and existing.get("project")
+                    and existing["project"] != project
+                ):
+                    raise RelayError("local config already exists; back it up, then use --replace")
                 try:
-                    result = client.join()
+                    if create:
+                        result = client.create(project)
+                    else:
+                        result = client.join(project)
                 except RelayError as error:
-                    if error.payload.get("code") != "project_missing":
+                    if create and error.payload.get("code") == "projects_exist":
+                        projects = [
+                            entry.get("project")
+                            for entry in client.projects().get("projects", [])
+                        ]
+                        if len(projects) == 1:
+                            project = projects[0]
+                            if (
+                                existing
+                                and not replacing
+                                and existing.get("project")
+                                and existing["project"] != project
+                            ):
+                                raise RelayError(
+                                    "local config already exists; back it up, then use --replace"
+                                )
+                            result = client.join(project)
+                        else:
+                            raise RelayError(
+                                "project creation raced with another project; choose one "
+                                "with --project: "
+                                + ", ".join(projects or ["(none listed)"])
+                            ) from None
+                    elif error.payload.get("code") == "project_missing":
+                        projects = [
+                            entry.get("project")
+                            for entry in error.payload.get("projects", [])
+                        ]
+                        raise RelayError(
+                            f"project '{project}' does not exist. Existing projects: "
+                            f"{', '.join(projects) or '(none)'}."
+                        ) from None
+                    else:
                         raise
-                    existing = [
-                        entry.get("project") for entry in error.payload.get("projects", [])
-                    ]
-                    raise RelayError(
-                        f"project '{project}' does not exist. "
-                        f"Existing projects: {', '.join(existing) or '(none)'}. "
-                        "Join one of those, or create this project with "
-                        "`roomctl create-project --project <name>`."
-                    ) from None
-            write_config({"api": api, "project": project, "agent_id": agent})
+            saved = {"api": api, "project": project, "agent_id": agent}
+            if config_identity(existing) == config_identity(saved):
+                if "cursor" in existing:
+                    saved["cursor"] = existing["cursor"]
+            write_config(saved)
             print(json.dumps(result | {"config": str(config_path())}, ensure_ascii=False))
             return 0
 
@@ -234,6 +356,44 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False))
         elif args.command == "read":
             print(json.dumps(client.read(args.after), ensure_ascii=False))
+        elif args.command == "wait":
+            if args.timeout is not None and (
+                not math.isfinite(args.timeout) or args.timeout < 0
+            ):
+                raise ValueError("timeout must be a finite non-negative number")
+            cursor = config.get("cursor", 0)
+            deadline = None if args.timeout is None else time.monotonic() + args.timeout
+            errors = 0
+            last = {"messages": [], "next_after": cursor}
+            while deadline is None or time.monotonic() < deadline:
+                try:
+                    last = client.read(cursor)
+                    errors = 0
+                except RelayError as error:
+                    errors += 1
+                    if errors >= 10:
+                        raise error
+                else:
+                    cursor = last["next_after"]
+                    incoming = [
+                        message
+                        for message in last["messages"]
+                        if message["recipient"] == client.agent_id
+                        and message["sender"] != client.agent_id
+                    ]
+                    if incoming:
+                        last = {"messages": incoming, "next_after": cursor}
+                        print(json.dumps(last, ensure_ascii=False), flush=True)
+                        save_wait_cursor(config, cursor)
+                        return 0
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    break
+                time.sleep(3 if remaining is None else min(3, remaining))
+            last = {"messages": [], "next_after": cursor}
+            print(json.dumps(last, ensure_ascii=False), flush=True)
+            save_wait_cursor(config, cursor)
+            return 0
         elif args.command == "participants":
             print(json.dumps(client.participants(), ensure_ascii=False))
         elif args.command == "projects":

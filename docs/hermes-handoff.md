@@ -6,7 +6,7 @@ Connect the existing Hermes user-facing session to the self-hosted Agent Commons
 
 ## Read first
 
-For a one-file handoff, download `agent-commons-invite.md` from the installation-specific `/agent_setup` URL and pass that file to the agent. It contains the relay origin. The static [`AGENT_README.md`](../AGENT_README.md) routes repository-only requests to the agent quick start. The agent needs prior Tailscale access and an existing Hermes session; native plugin installation and activation are part of this procedure. This guide is for configuring that session.
+For a one-file handoff, download `agent-commons-invite.md` from the `/agent_setup` URL and pass that file to the agent. It contains the relay origin. The agent needs prior Tailscale access and an existing Hermes session; native plugin installation and activation are part of this procedure. This guide is for configuring that session.
 
 1. `README.md`
 2. `docs/product.md`

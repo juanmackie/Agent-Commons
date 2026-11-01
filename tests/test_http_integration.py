@@ -1,14 +1,16 @@
 import asyncio
 import json
+import os
 import socket
+import sys
 import uuid
+from pathlib import Path
 
 import httpx
 import uvicorn
 
 from app.main import create_app
 from app.store import ProjectStore
-import roomctl
 
 
 def test_two_real_http_clients_exchange_messages_over_loopback(tmp_path):
@@ -119,42 +121,60 @@ def test_agents_setup_before_first_agent_creates_a_project(tmp_path, monkeypatch
                 assert setup_page.status_code == 200
                 assert setup_page.headers["content-disposition"] == 'attachment; filename="agent-commons-invite.md"'
                 assert api in setup_page.text
-                assert "does not create or join a project" in setup_page.text
-                assert "python roomctl.py create-project --project agent-commons" in setup_page.text
+                assert "python roomctl.py join" in setup_page.text
                 assert (await client.get("/v1/projects")).json() == {"projects": []}
 
-            monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "pi"))
-            assert await asyncio.to_thread(
-                roomctl.main, ["setup", "--api", api, "--agent", "pi"]
-            ) == 0
-            pi_config = roomctl.config_path()
-            assert json.loads(pi_config.read_text()) == {"api": api, "agent_id": "pi"}
+            repo = Path(__file__).resolve().parents[1]
+            env_a = os.environ.copy() | {"LOCALAPPDATA": str(tmp_path / "agent-a")}
+            env_b = os.environ.copy() | {"LOCALAPPDATA": str(tmp_path / "agent-b")}
 
-            monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "hermes"))
-            assert await asyncio.to_thread(
-                roomctl.main, ["setup", "--api", api, "--agent", "hermes"]
-            ) == 0
-            hermes_config = roomctl.config_path()
-            assert json.loads(hermes_config.read_text()) == {
-                "api": api,
-                "agent_id": "hermes",
+            async def cli(env, *args):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    str(repo / "roomctl.py"),
+                    *args,
+                    cwd=repo,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+                assert process.returncode == 0, stderr.decode()
+                return json.loads(stdout)
+
+            setup_a = await cli(env_a, "setup", "--api", api)
+            setup_b = await cli(env_b, "setup", "--api", api)
+            agent_a = setup_a["agent_id"]
+            agent_b = setup_b["agent_id"]
+            await cli(env_a, "join")
+            await cli(env_b, "join")
+            assert store.projects()[0]["project"] == "agent-commons"
+            assert {member["agent_id"] for member in store.participants("agent-commons")} == {
+                agent_a,
+                agent_b,
             }
-            assert store.projects() == []
 
-            monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "pi"))
-            assert await asyncio.to_thread(
-                roomctl.main, ["create-project", "--project", "crew"]
-            ) == 0
-            assert store.projects()[0]["project"] == "crew"
+            waiter = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(repo / "roomctl.py"),
+                "wait",
+                "--timeout",
+                "5",
+                cwd=repo,
+                env=env_a,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            sent = await cli(
+                env_b, "send", "--to", agent_a, "--text", "setup-check-integration"
+            )
+            stdout, stderr = await asyncio.wait_for(waiter.communicate(), timeout=8)
+            assert waiter.returncode == 0, stderr.decode()
+            received = json.loads(stdout)
+            assert [message["seq"] for message in received["messages"]] == [sent["seq"]]
 
-            monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "hermes"))
-            assert await asyncio.to_thread(
-                roomctl.main, ["join", "--project", "crew"]
-            ) == 0
-            assert [member["agent_id"] for member in store.participants("crew")] == [
-                "hermes",
-                "pi",
-            ]
+            cursor = await cli(env_a, "wait", "--timeout", "0")
+            assert cursor == {"messages": [], "next_after": sent["seq"]}
         finally:
             server.should_exit = True
             try:

@@ -3,6 +3,7 @@
 import os
 import re
 import threading
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,7 @@ from pydantic import (
     field_validator,
 )
 
+from app.client import LOOPBACK_HOSTS
 from app.store import (
     Conflict,
     MessageCapacity,
@@ -33,6 +35,17 @@ MAX_BODY_BYTES = 100 * 1024
 _MAX_SQLITE_INTEGER = (1 << 63) - 1
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _origin(request: Request) -> str:
+    parsed = urllib.parse.urlsplit(str(request.base_url))
+    host = parsed.hostname or ""
+    scheme = (
+        "http"
+        if parsed.scheme == "http" and host.lower() in LOOPBACK_HOSTS
+        else "https"
+    )
+    return urllib.parse.urlunsplit((scheme, parsed.netloc, "", "", "")).rstrip("/")
 
 
 class JoinInput(BaseModel):
@@ -212,7 +225,7 @@ def create_app(
 
     @app.get("/agent_setup", response_class=PlainTextResponse)
     def agent_setup(request: Request):
-        origin = str(request.base_url).rstrip("/")
+        origin = _origin(request)
         content = Path(__file__).with_name("agent_setup.md").read_text(encoding="utf-8")
         return PlainTextResponse(
             content.replace("{{ORIGIN}}", origin),
@@ -226,7 +239,7 @@ def create_app(
     def invitation(request: Request, project: str = Query(min_length=1, max_length=64)):
         if not _PROJECT.fullmatch(project):
             raise HTTPException(status_code=422, detail="invalid project name")
-        origin = str(request.base_url).rstrip("/")
+        origin = _origin(request)
         content = Path(__file__).with_name("join.md").read_text(encoding="utf-8")
         return PlainTextResponse(
             content.replace("{{PROJECT}}", project).replace("{{ORIGIN}}", origin),
