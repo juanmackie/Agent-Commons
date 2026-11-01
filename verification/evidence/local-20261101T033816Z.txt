@@ -1,0 +1,68 @@
+Agent Commons local verification
+UTC: 20261101T033816Z
+Scope: project, Hermes-plugin, and Pi-extension tests plus package and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+   Building agent-room-relay @ file:///C:/Users/juanm/Documents/GitHub/Agent%20Commons
+      Built agent-room-relay @ file:///C:/Users/juanm/Documents/GitHub/Agent%20Commons
+Prepared 1 package in 2.07s
+Uninstalled 1 package in 5ms
+Installed 1 package in 8ms
+ ~ agent-room-relay==0.1.0 (from file:///C:/Users/juanm/Documents/GitHub/Agent%20Commons)
+Resolved 30 packages in 11ms
+Python: 3.12.13
+..............................s.....................                     [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\juanm\Documents\GitHub\Agent Commons\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] integrations\hermes\agent-commons\test_plugin.py:51: could not import 'hermes_cli.plugins': No module named 'hermes_cli'
+51 passed, 1 skipped, 1 warning in 1.63s
+✔ incoming relay data is durable before delivery and remains assigned to its exact session (1.7649ms)
+✔ messages cannot be queued without a verified target session (0.9798ms)
+✔ full inbox does not advance past an unpersisted target message (1.6616ms)
+✔ completion durably closes the thread and drops later messages from model delivery (2.4053ms)
+✔ approved outbound payload persists with a stable retry ID until acknowledged (1.0325ms)
+✔ completion notices are visible in session history without a user-model turn (0.2596ms)
+✔ acknowledgment is one-session-only and marks the relay message seen (0.3493ms)
+✔ only one Pi process can own an inbox until its owner releases the lock (34.0478ms)
+✔ peer delivery metadata is recovered from current prompt and persisted session history (4.4783ms)
+✔ peer provenance survives a later user turn and ignores non-user and malformed entries (0.495ms)
+✔ read-only tools do not ask for destructive-action approval (1.7847ms)
+✔ peer side effects and every outbound relay message require human review (0.2622ms)
+✔ unknown or side-effecting tools require exact human approval (5.5312ms)
+✔ outbound envelope resolves recipient and preserves the peer thread before approval (3.2859ms)
+✔ closed or exhausted peer threads cannot accept another reply (0.8163ms)
+✔ closed thread IDs are rejected even after peer context has ended (0.2816ms)
+✔ legacy roomctl sends are gated as outbound messages (0.2131ms)
+✔ relay message approval shows the exact recipient and message body (0.9955ms)
+✔ denial and missing UI block peer-requested actions (1.5934ms)
+✔ oversized action details are blocked instead of asking ambiguous approval (0.4682ms)
+✔ relay poll uses project addressing and no application credential (66.5346ms)
+✔ relay post validates and sends a bounded project message (0.9226ms)
+✔ relay client refuses unsafe endpoints and invalid message shapes (1.0076ms)
+✔ malformed send receipts fail closed so the durable outbox can retry (0.4856ms)
+✔ malformed envelopes and out-of-order relay messages fail closed (0.7097ms)
+✔ relay API failures fail closed (0.3551ms)
+✔ oversized relay responses are rejected before JSON parsing (3.9985ms)
+✔ peer provenance and cursor survive a Pi session restart (14.175ms)
+✔ pending relay payload and room identity survive restart, and room changes fail closed (8.4077ms)
+✔ legacy pending messages bind only to their persisted session owner (10.518ms)
+✔ corrupt peer provenance fails closed rather than dropping the approval gate (3.5957ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 262.6537
+Compose structure, loopback bind, non-root/read-only policy, persistent mount, and pinned base: PASS
+Source/wheel build: PASS
+Source/wheel build and installed module inclusion: PASS
+Docker image/container lifecycle: NOT RUN (Docker CLI unavailable).
+Active Hermes/Pi session exchange, live permission outcomes, and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md).
+Evidence saved: verification/evidence/local-20261101T033816Z.txt
