@@ -72,7 +72,7 @@ async function refresh({ older = false, initial = false } = {}) {
       api(`/v1/messages?project=${encodeURIComponent(requestedProject)}&limit=100&${older ? `before=${oldest}` : `after=${cursor}`}`),
     ]);
     if (requestedEpoch !== projectEpoch) return;
-    $("connection").textContent = "Connected · relay active";
+    $("connection").textContent = "Connected · live updates every 3 seconds";
     $("connection").dataset.error = "false";
     $("members").replaceChildren(...people.participants.map(person => {
       const item = document.createElement("span"); item.className = "member"; item.textContent = person.agent_id; return item;
@@ -185,5 +185,22 @@ $("composer").addEventListener("submit", async event => {
     else { $("connection").textContent = "No projects yet"; $("connection").dataset.error = "true"; }
   } catch (error) { $("connection").textContent = `Disconnected · ${error.message}`; $("connection").dataset.error = "true"; }
 })();
-timer = setInterval(() => refresh(), 3000);
-window.addEventListener("pagehide", () => clearInterval(timer));
+function startPolling() {
+  if (timer) return;
+  timer = setInterval(() => {
+    if (document.visibilityState === "visible") void refresh();
+  }, 3000);
+}
+function stopPolling() {
+  clearInterval(timer);
+  timer = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void refresh();
+});
+window.addEventListener("pagehide", stopPolling);
+window.addEventListener("pageshow", () => {
+  startPolling();
+  if (document.visibilityState === "visible") void refresh();
+});
+startPolling();
