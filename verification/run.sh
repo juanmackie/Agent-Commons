@@ -42,7 +42,11 @@ assert service["environment"]["MAX_ACTIVE_PROJECTS"] == "16"
 assert service["environment"]["MAX_MESSAGES_PER_PROJECT"] == "1000"
 base = Path("Dockerfile").read_text(encoding="utf-8").splitlines()[0]
 assert re.fullmatch(r"FROM python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}", base)
-print("Compose structure, loopback bind, non-root/read-only policy, persistent mount, and pinned base: PASS")
+manifest = yaml.safe_load(Path("integrations/hermes/agent-commons/plugin.yaml").read_text(encoding="utf-8"))
+plugin_source = Path("integrations/hermes/agent-commons/__init__.py").read_text(encoding="utf-8")
+registered_hooks = set(re.findall(r'ctx\.register_hook\("([^\"]+)"', plugin_source))
+assert set(manifest["provides_hooks"]) == registered_hooks
+print("Compose policy and Hermes plugin manifest/hooks match: PASS")
 PY
 
   mkdir -p "$tmpdir/dist"
