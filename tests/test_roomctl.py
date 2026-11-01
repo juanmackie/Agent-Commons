@@ -13,6 +13,7 @@ def _config(tmp_path, monkeypatch, value=None):
 
 
 def test_setup_generates_name_and_rerun_reuses_saved_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AGENT_ID", raising=False)
     path = _config(tmp_path, monkeypatch)
 
     class Client:
@@ -311,27 +312,179 @@ def test_wait_timeout_emits_empty_batch(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {"messages": [], "next_after": 0}
 
 
-def test_wait_stops_after_ten_consecutive_relay_errors(tmp_path, monkeypatch, capsys):
+def test_wait_without_project_fails_before_polling(tmp_path, monkeypatch, capsys):
+    _config(
+        tmp_path,
+        monkeypatch,
+        {"api": "https://relay.tailnet", "agent_id": "pi"},
+    )
+    def unexpected_sleep(_seconds):
+        raise AssertionError("wait must not retry without a project")
+    monkeypatch.setattr(roomctl.time, "sleep", unexpected_sleep)
+    assert roomctl.main(["wait"]) == 1
+    assert "create or join a project first" in capsys.readouterr().err
+
+
+def test_wait_retries_twelve_relay_errors_then_receives_message(tmp_path, monkeypatch, capsys):
     _config(
         tmp_path,
         monkeypatch,
         {"api": "https://relay.tailnet", "project": "demo", "agent_id": "pi"},
     )
     calls = []
+    delays = []
+
+    class Client:
+        agent_id = "pi"
+        def __init__(self, *_args):
+            pass
+        def read(self, _after):
+            calls.append(1)
+            if len(calls) <= 12:
+                raise roomctl.RelayError("relay unavailable")
+            return {"messages": [{"sender": "hermes", "recipient": "pi", "seq": 1}], "next_after": 1}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    monkeypatch.setattr(roomctl.time, "sleep", delays.append)
+    monkeypatch.setattr(roomctl.time, "monotonic", lambda: 100.0)
+    assert roomctl.main(["wait", "--timeout", "600"]) == 0
+    assert len(calls) == 13
+    assert delays[:6] == [3, 6, 12, 24, 48, 60]
+    assert json.loads(capsys.readouterr().out)["messages"][0]["seq"] == 1
+
+
+def test_wait_stops_on_non_retryable_4xx_with_rejoin_hint(tmp_path, monkeypatch, capsys):
+    _config(
+        tmp_path,
+        monkeypatch,
+        {"api": "https://relay.tailnet", "project": "demo", "agent_id": "pi"},
+    )
 
     class Client:
         def __init__(self, *_args):
             pass
-
         def read(self, _after):
-            calls.append(1)
-            raise roomctl.RelayError("relay unavailable")
+            raise roomctl.RelayError("relay returned HTTP 404", status=404)
 
     monkeypatch.setattr(roomctl, "RelayClient", Client)
     monkeypatch.setattr(roomctl.time, "sleep", lambda _seconds: None)
     assert roomctl.main(["wait"]) == 1
-    assert len(calls) == 10
-    assert "relay unavailable" in capsys.readouterr().err
+    assert "project may be expired or missing" in capsys.readouterr().err
+
+
+def test_reply_to_inherits_target_thread_hop_and_recipient_and_can_complete(tmp_path, monkeypatch, capsys):
+    _config(tmp_path, monkeypatch, {"api": "https://relay.tailnet", "project": "demo", "agent_id": "hermes"})
+    target = {"seq": 12, "sender": "pi", "recipient": "hermes", "thread_id": "550e8400-e29b-41d4-a716-446655440001", "hop": 3, "complete": False}
+    sent = []
+
+    class Client:
+        agent_id = "hermes"
+        def __init__(self, *_args): pass
+        def read_before(self, before, limit=1):
+            assert (before, limit) == (13, 1)
+            return {"messages": [target]}
+        def read(self, after):
+            return {"messages": [], "next_after": after}
+        def post(self, payload):
+            sent.append(payload.copy())
+            return {"seq": 13}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["send", "--reply-to", "12", "--text", "done", "--complete"]) == 0
+    assert sent[0]["recipient"] == "pi"
+    assert sent[0]["thread_id"] == target["thread_id"]
+    assert sent[0]["reply_to"] == 12 and sent[0]["hop"] == 4
+    assert sent[0]["complete"] is True
+
+
+def test_reply_to_refuses_thread_closed_before_reply_target(tmp_path, monkeypatch, capsys):
+    _config(tmp_path, monkeypatch, {"api": "https://relay.tailnet", "project": "demo", "agent_id": "hermes"})
+    thread_id = "550e8400-e29b-41d4-a716-446655440001"
+    closure = {"seq": 11, "sender": "pi", "thread_id": thread_id, "hop": 2, "complete": True}
+    target = {"seq": 12, "sender": "pi", "thread_id": thread_id, "hop": 3, "complete": False}
+
+    class Client:
+        def __init__(self, *_args): pass
+        def read_before(self, _before, limit=1): return {"messages": [target]}
+        def read(self, after):
+            if after == 0:
+                return {"messages": [closure, target], "next_after": 12}
+            return {"messages": [], "next_after": after}
+        def post(self, _payload): raise AssertionError("reply to closed thread must not send")
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["send", "--reply-to", "12", "--text", "reply"]) == 1
+    assert "thread is closed" in capsys.readouterr().err
+
+
+def test_reply_to_refuses_hop_eight(tmp_path, monkeypatch, capsys):
+    _config(tmp_path, monkeypatch, {"api": "https://relay.tailnet", "project": "demo", "agent_id": "hermes"})
+    target = {"seq": 12, "sender": "pi", "thread_id": "550e8400-e29b-41d4-a716-446655440001", "hop": 7, "complete": False}
+
+    class Client:
+        def __init__(self, *_args): pass
+        def read_before(self, _before, limit=1): return {"messages": [target]}
+        def read(self, _after): return {"messages": [], "next_after": _after}
+        def post(self, _payload): raise AssertionError("hop-eight reply must not send")
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["send", "--reply-to", "12", "--text", "reply"]) == 1
+    assert "hop 8" in capsys.readouterr().err
+
+
+def test_pending_completion_retry_replays_without_reading_mutable_reply_history(tmp_path, monkeypatch, capsys):
+    _config(tmp_path, monkeypatch, {"api": "https://relay.tailnet", "project": "demo", "agent_id": "hermes"})
+    payload = {
+        "client_msg_id": "550e8400-e29b-41d4-a716-446655440099",
+        "sender": "hermes", "recipient": "pi",
+        "thread_id": "550e8400-e29b-41d4-a716-446655440001",
+        "reply_to": 12, "hop": 1, "text": "final answer", "complete": True,
+    }
+    db = roomctl.state_db()
+    db.execute("INSERT INTO pending VALUES (?,?)", (payload["client_msg_id"], json.dumps(payload, sort_keys=True)))
+    db.commit()
+    db.close()
+    sent = []
+
+    class Client:
+        agent_id = "hermes"
+        def __init__(self, *_args): pass
+        def read_before(self, *_args, **_kwargs):
+            raise AssertionError("retry must not revalidate a pruned/closed reply target")
+        def read(self, *_args):
+            raise AssertionError("retry must not scan mutable thread history")
+        def post(self, value):
+            sent.append(value)
+            return {"seq": 13}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["send", "--reply-to", "12", "--text", "final answer", "--complete"]) == 0
+    assert sent == [payload]
+    assert json.loads(capsys.readouterr().out)["seq"] == 13
+
+
+def test_reply_to_refuses_closed_threads_and_pruned_targets(tmp_path, monkeypatch, capsys):
+    _config(tmp_path, monkeypatch, {"api": "https://relay.tailnet", "project": "demo", "agent_id": "hermes"})
+    target = {"seq": 12, "sender": "pi", "recipient": "hermes", "thread_id": "550e8400-e29b-41d4-a716-446655440001", "hop": 0, "complete": False}
+
+    class Client:
+        def __init__(self, *_args): pass
+        def read_before(self, _before, limit=1): return {"messages": [target]}
+        def read(self, after):
+            closure = target | {"seq": 14, "complete": True}
+            return {"messages": [closure], "next_after": 14} if after < 14 else {"messages": [], "next_after": after}
+        def post(self, _payload): raise AssertionError("closed reply must not send")
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["send", "--reply-to", "12", "--text", "reply"]) == 1
+    assert "thread is closed" in capsys.readouterr().err
+
+    class PrunedClient(Client):
+        def read_before(self, _before, limit=1): return {"messages": [target | {"seq": 11}]}
+
+    monkeypatch.setattr(roomctl, "RelayClient", PrunedClient)
+    assert roomctl.main(["send", "--reply-to", "12", "--text", "reply"]) == 1
+    assert "pruned or missing" in capsys.readouterr().err
 
 
 def test_setup_refuses_an_unreachable_relay_and_writes_no_config(

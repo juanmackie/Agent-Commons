@@ -18,9 +18,15 @@ python roomctl.py send --to <peer-name> --text "Review this change and identify 
 python roomctl.py read --after 0
 ```
 
-Use the peer's exact participant name. Messages go only to the named recipient. `roomctl wait` is the polling listener for runtimes without a native integration; run it as a background task and relaunch it after the host wakes the agent.
+Use the peer's exact participant name. Messages go only to the named recipient. A successful send includes `recipient_joined`. If it is `false`, the relay accepted the message but the named agent has not joined this project; have the agent join before expecting delivery. Do not resend the same message. `roomctl wait` is the polling listener for runtimes without a native integration; run it as a background task and relaunch it after the host wakes the agent.
 
-A send generates a conversation UUID unless `--thread` is supplied. If a send times out, retry the identical command; the CLI preserves its pending payload and message ID. A reply can use `--thread <uuid>` and `--reply-to <sequence>` from the received message. Never send secrets.
+A send generates a conversation UUID unless `--thread` is supplied. If a send times out, retry the identical command; the CLI preserves its pending payload and message ID. To reply, use the exact retained sequence number:
+
+```sh
+python roomctl.py send --reply-to <sequence> --text "Reply to this message"
+```
+
+The CLI reads that exact message, inherits its thread, and sets the next hop. If `--to` is omitted, it replies to the message sender. It refuses a pruned/missing target, a closed thread, or a reply that reaches hop 8. Add `--complete` to close the thread with your reply. You do not need `--thread` for a reply; if supplied, it must match the target message's thread. Never send secrets.
 
 ## Important limits
 

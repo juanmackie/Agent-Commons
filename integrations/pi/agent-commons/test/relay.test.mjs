@@ -48,11 +48,11 @@ test("malformed envelopes and out-of-order relay messages fail closed",async()=>
   await assert.rejects(outOfOrder.read(0),/invalid message/);
 });
 
-test("relay API failures fail closed",async()=>{
+test("relay API errors retain HTTP status for outbound classification",async()=>{
   const client=new RelayClient({...config,fetchImpl:async()=>new Response("unavailable",{status:503})});
-  await assert.rejects(client.read(0), error => error.message.includes("HTTP 503") && error.retryable && !error.configuration);
+  await assert.rejects(client.read(0), error => error.status === 503 && error.retryable && !error.configuration);
   const rejected=new RelayClient({...config,fetchImpl:async()=>new Response("rejected",{status:401})});
-  await assert.rejects(rejected.read(0), error => error.message.includes("HTTP 401") && !error.retryable && error.configuration);
+  await assert.rejects(rejected.read(0), error => error.status === 401 && !error.retryable && error.configuration);
 });
 
 test("relay response interruptions are classified as retryable without exposing response data", async () => {

@@ -1,0 +1,81 @@
+Agent Commons local verification
+UTC: 20261101T062626Z
+Scope: project, Hermes-plugin, and Pi-extension tests plus package and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+Checked 29 packages in 3ms
+Resolved 30 packages in 1ms
+Python: 3.12.13
+.........................................................s.............. [ 75%]
+........................                                                 [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\juanm\Documents\GitHub\Agent Commons\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] integrations\hermes\agent-commons\test_plugin.py:54: could not import 'hermes_cli.plugins': No module named 'hermes_cli'
+95 passed, 1 skipped, 1 warning in 9.44s
+✔ registered send handler does not report a conflicting queued retry as successful (37.7889ms)
+✔ an idle wake is reserved until the matching session starts or the reservation expires (1.622ms)
+✔ incoming relay data is durable before delivery and remains assigned to its exact session (3.9376ms)
+✔ an interrupt is delivered before older ordinary inbox messages (0.2896ms)
+✔ visible prioritized messages are acknowledged even when older messages are not visible (2.0873ms)
+✔ messages cannot be queued without a verified target session (0.6484ms)
+✔ full inbox does not advance past an unpersisted target message (0.4401ms)
+✔ completion durably closes the thread and drops later messages from model delivery (0.332ms)
+✔ outbound failures distinguish retry, rejected, and expired-project hold (0.2172ms)
+✔ rejecting an outbound completion releases the thread and allows later relay messages (0.4065ms)
+✔ rejected outbound completion preserves an independently confirmed closure (0.4178ms)
+✔ queued-send detection requires the exact durable envelope (0.4912ms)
+✔ approved outbound payload persists with a stable retry ID until acknowledged (0.4183ms)
+✔ completion notices are visible in session history without a user-model turn (0.2033ms)
+✔ acknowledgment is one-session-only and marks the relay message seen (0.2434ms)
+Recovered stale Agent Commons owner lock for PID 2000000000 at C:\Users\juanm\AppData\Local\Temp\agent-commons-owner-TEIA88\pi-state.json.owner.lock
+✔ a stale owner PID is recovered and a live owner remains protected (36.5763ms)
+✔ a stale recovery guard fails closed without removing the owner lock (18.6026ms)
+Recovered stale Agent Commons owner lock for PID 2000000000 at C:\Users\juanm\AppData\Local\Temp\agent-commons-owner-race-o8UOru\pi-state.json.owner.lock
+✔ concurrent stale-lock recovery leaves exactly one process as owner (29.2239ms)
+✔ a lock held by a different live process remains protected (22.7534ms)
+✔ peer delivery metadata is recovered from current prompt and persisted session history (2.351ms)
+✔ peer provenance survives a later user turn and ignores non-user and malformed entries (0.4308ms)
+✔ read-only tools do not ask for destructive-action approval (2.109ms)
+✔ peer side effects and every outbound relay message require human review (0.2521ms)
+✔ unknown or side-effecting tools require exact human approval (0.9227ms)
+✔ outbound envelope resolves recipient and preserves the peer thread before approval (1.2997ms)
+✔ closed or exhausted peer threads cannot accept another reply (1.6323ms)
+✔ closed thread IDs are rejected even after peer context has ended (0.274ms)
+✔ legacy roomctl sends are gated as outbound messages (0.2045ms)
+✔ relay message approval shows the exact recipient and message body (0.9063ms)
+✔ denial and missing UI block peer-requested actions (1.5543ms)
+✔ oversized action details are blocked instead of asking ambiguous approval (0.3705ms)
+✔ relay poll uses project addressing and no application credential (32.8247ms)
+✔ relay post validates and sends a bounded project message (1.4215ms)
+✔ relay client refuses unsafe endpoints and invalid message shapes (1.4009ms)
+✔ malformed send receipts fail closed so the durable outbox can retry (0.8206ms)
+✔ malformed envelopes and out-of-order relay messages fail closed (1.1794ms)
+✔ relay API errors retain HTTP status for outbound classification (0.9565ms)
+✔ relay response interruptions are classified as retryable without exposing response data (1.1749ms)
+✔ oversized relay responses are rejected before JSON parsing (7.284ms)
+✔ new messages follow the feed only when the reader is near the bottom (0.6879ms)
+✔ loading earlier messages keeps the visible content at the same viewport position (0.1206ms)
+✔ peer provenance and cursor survive a Pi session restart (11.6089ms)
+✔ pending relay payload and room identity survive restart, and room changes fail closed (7.8326ms)
+✔ legacy pending messages bind only to their persisted session owner (10.1074ms)
+✔ corrupt peer provenance fails closed rather than dropping the approval gate (5.5123ms)
+✔ state replacement leaves a complete readable record (6.2078ms)
+ℹ tests 46
+ℹ suites 0
+ℹ pass 46
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 327.2668
+Compose policy and Hermes plugin manifest/hooks match: PASS
+Source/wheel build: PASS
+Source/wheel build and installed module inclusion: PASS
+Docker image/container lifecycle: NOT RUN (Docker CLI unavailable).
+Active Hermes/Pi session exchange, live permission outcomes, and TrueNAS/Tailscale acceptance: NOT RUN (external gates; see docs/operations.md).
+Evidence saved: verification/evidence/local-20261101T062626Z.txt

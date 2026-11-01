@@ -71,7 +71,6 @@ export async function loadState(file, expectedFingerprint = null) {
     const effectiveClosedThreads = new Set([
       ...closedThreads,
       ...pendingInbox.filter((message) => message.complete).map((message) => message.thread_id),
-      ...outbox.filter((message) => message.complete).map((message) => message.thread_id),
       ...(peer?.complete ? [peer.thread_id] : []),
     ]);
     if (effectiveClosedThreads.size > 10000) throw new Error("too many closed threads");

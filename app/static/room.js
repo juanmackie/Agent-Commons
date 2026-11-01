@@ -5,7 +5,7 @@ const label = /^[A-Za-z0-9_-]{1,64}$/;
 const sentKey = id => `agent-commons-fanout-${id}`;
 const themeKey = "agent-commons-theme";
 const systemColorScheme = window.matchMedia?.("(prefers-color-scheme: dark)");
-let project = "", projectEpoch = 0, cursor = 0, oldest = null, seen = new Set(), messages = new Map(), timer, refreshing = false;
+let project = "", projectEpoch = 0, cursor = 0, oldest = null, seen = new Set(), messages = new Map(), closedThreads = new Set(), timer, refreshing = false;
 
 let savedTheme = null;
 try {
@@ -52,6 +52,7 @@ function status(message, error = false) {
 function render(message, prepend = false) {
   if (seen.has(message.client_msg_id)) return;
   seen.add(message.client_msg_id); messages.set(message.client_msg_id, message);
+  if (message.complete) closedThreads.add(message.thread_id);
   const article = document.createElement("article");
   article.className = "message";
   const head = document.createElement("div"); head.className = "message-head";
@@ -102,9 +103,11 @@ async function refresh({ older = false, initial = false } = {}) {
     }
     const reply = $("reply"), selectedReply = reply.value;
     reply.replaceChildren(new Option("New conversation", ""), ...[...messages.values()].map(message => {
-      const option = new Option(`${message.sender} → ${message.recipient}: ${message.text.slice(0, 60)}`, JSON.stringify(message));
+      const closed = message.complete || closedThreads.has(message.thread_id);
+      const option = new Option(`${message.sender} → ${message.recipient}: ${message.text.slice(0, 60)}${closed ? " (closed)" : ""}`, JSON.stringify(message));
+      option.disabled = closed;
       return option;
-    }).filter(Boolean));
+    }));
     reply.value = selectedReply;
   } catch (error) {
     $("connection").textContent = `Disconnected · ${error.message}`;
@@ -119,7 +122,7 @@ async function refresh({ older = false, initial = false } = {}) {
 }
 $("project").addEventListener("change", () => {
   project = $("project").value; projectEpoch++; cursor = 0; oldest = Number.MAX_SAFE_INTEGER;
-  seen.clear(); messages.clear(); $("feed").replaceChildren();
+  seen.clear(); messages.clear(); closedThreads.clear(); $("feed").replaceChildren();
   $("older").hidden = true;
   $("recipient").replaceChildren();
   $("reply").replaceChildren(new Option("New conversation", ""));
@@ -139,7 +142,7 @@ $("composer").addEventListener("submit", async event => {
   const submittedProject = project;
   if (!label.test(sender) || !recipients.length || !text.trim()) return status("Choose a sender, recipients, and a message.", true);
   const reply = $("reply").value ? JSON.parse($("reply").value) : null;
-  if (reply?.complete) return status("This thread is closed. Start a new conversation.", true);
+  if (reply && (reply.complete || closedThreads.has(reply.thread_id))) return status("This thread is closed. Start a new conversation.", true);
   if (reply?.hop >= 8) return status("This thread reached its reply limit. Start a new conversation.", true);
   if (reply) {
     const target = reply.sender === sender ? reply.recipient : reply.sender;

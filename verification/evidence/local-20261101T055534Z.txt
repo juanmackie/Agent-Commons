@@ -1,0 +1,171 @@
+Agent Commons local verification
+UTC: 20261101T055534Z
+Scope: project, Hermes-plugin, and Pi-extension tests plus package and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+Checked 29 packages in 6ms
+Resolved 30 packages in 22ms
+Python: 3.12.13
+...........F.......................................s.................... [ 84%]
+.............                                                            [100%]
+================================== FAILURES ===================================
+_________ test_two_real_http_clients_exchange_messages_over_loopback __________
+
+tmp_path = WindowsPath('C:/Users/juanm/Documents/GitHub/Agent Commons/pytest-of-juanm/pytest-121/test_two_real_http_clients_exc0')
+
+    def test_two_real_http_clients_exchange_messages_over_loopback(tmp_path):
+        async def scenario():
+            store = ProjectStore(tmp_path / "messages.sqlite3")
+            app = create_app(store=store)
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            host, port = listener.getsockname()
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    app,
+                    host=host,
+                    port=port,
+                    log_level="critical",
+                    access_log=False,
+                    lifespan="off",
+                )
+            )
+            task = asyncio.create_task(server.serve(sockets=[listener]))
+            try:
+                for _ in range(200):
+                    if server.started:
+                        break
+                    await asyncio.sleep(0.01)
+                assert server.started, "Uvicorn did not start on loopback"
+                async with (
+                    httpx.AsyncClient(base_url=f"http://{host}:{port}", timeout=5) as pi,
+                    httpx.AsyncClient(
+                        base_url=f"http://{host}:{port}", timeout=5
+                    ) as hermes,
+                ):
+                    await pi.post("/v1/projects", json={"project": "demo", "agent": "pi"})
+                    await hermes.post(
+                        "/v1/join", json={"project": "demo", "agent": "hermes"}
+                    )
+                    message = {
+                        "client_msg_id": str(uuid.uuid4()),
+                        "sender": "pi",
+                        "recipient": "hermes",
+                        "thread_id": str(uuid.uuid4()),
+                        "reply_to": None,
+                        "hop": 0,
+                        "text": "check loopback",
+                        "complete": False,
+                    }
+                    accepted = await pi.post("/v1/messages?project=demo", json=message)
+                    replay = await hermes.post("/v1/messages?project=demo", json=message)
+                    read = await hermes.get("/v1/messages?project=demo&after=0&limit=100")
+                    assert accepted.status_code == 201 and replay.status_code == 200
+                    assert accepted.json() == replay.json()
+                    assert read.json()["messages"] == [accepted.json()]
+                    assert read.json()["next_after"] == accepted.json()["seq"]
+                    reply = message | {
+                        "client_msg_id": str(uuid.uuid4()),
+                        "sender": "hermes",
+                        "recipient": "pi",
+                        "reply_to": accepted.json()["seq"],
+                        "text": "reply from Hermes",
+                    }
+                    answer = await hermes.post("/v1/messages?project=demo", json=reply)
+                    assert answer.status_code == 201
+                    caught_up = await pi.get(
+                        f"/v1/messages?project=demo&after={accepted.json()['seq']}&limit=100"
+                    )
+                    assert caught_up.json()["messages"] == [answer.json()]
+            finally:
+                server.should_exit = True
+                try:
+                    await asyncio.wait_for(task, timeout=5)
+                finally:
+                    store.close()
+    
+>       asyncio.run(scenario())
+
+tests\test_http_integration.py:89: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    async def scenario():
+        store = ProjectStore(tmp_path / "messages.sqlite3")
+        app = create_app(store=store)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        host, port = listener.getsockname()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level="critical",
+                access_log=False,
+                lifespan="off",
+            )
+        )
+        task = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            for _ in range(200):
+                if server.started:
+                    break
+                await asyncio.sleep(0.01)
+            assert server.started, "Uvicorn did not start on loopback"
+            async with (
+                httpx.AsyncClient(base_url=f"http://{host}:{port}", timeout=5) as pi,
+                httpx.AsyncClient(
+                    base_url=f"http://{host}:{port}", timeout=5
+                ) as hermes,
+            ):
+                await pi.post("/v1/projects", json={"project": "demo", "agent": "pi"})
+                await hermes.post(
+                    "/v1/join", json={"project": "demo", "agent": "hermes"}
+                )
+                message = {
+                    "client_msg_id": str(uuid.uuid4()),
+                    "sender": "pi",
+                    "recipient": "hermes",
+                    "thread_id": str(uuid.uuid4()),
+                    "reply_to": None,
+                    "hop": 0,
+                    "text": "check loopback",
+                    "complete": False,
+                }
+                accepted = await pi.post("/v1/messages?project=demo", json=message)
+                replay = await hermes.post("/v1/messages?project=demo", json=message)
+                read = await hermes.get("/v1/messages?project=demo&after=0&limit=100")
+                assert accepted.status_code == 201 and replay.status_code == 200
+                assert accepted.json() == replay.json()
+>               assert read.json()["messages"] == [accepted.json()]
+E               AssertionError: assert [{'client_msg...low_up', ...}] == [{'client_msg...low_up', ...}]
+E                 
+E                 At index 0 diff: {'seq': 1, 'client_msg_id': 'c24d16ec-467b-48cc-9084-3323d0a0f51a', 'sender': 'pi', 'recipient': 'hermes', 'thread_id': 'f3b0a543-00af-4615-bde3-ca05f646fe83', 'reply_to': None, 'hop': 0, 'text': 'check loopback', 'complete': False, 'delivery': 'follow_up', 'created_at': '2026-11-01T05:55:36Z'} != {'seq': 1, 'client_msg_id': 'c24d16ec-467b-48cc-9084-3323d0a0f51a', 'sender': 'pi', 'recipient': 'hermes', 'thread_id': 'f3b0a543-00af-4615-bde3-ca05f646fe83', 'reply_to': None, 'hop': 0, 'text': 'check loopback', 'complete': False, 'delivery': 'follow_up', 'c...
+E                 
+E                 ...Full output truncated (2 lines hidden), use '-vv' to show
+
+tests\test_http_integration.py:67: AssertionError
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\juanm\Documents\GitHub\Agent Commons\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] integrations\hermes\agent-commons\test_plugin.py:53: could not import 'hermes_cli.plugins': No module named 'hermes_cli'
+FAILED tests/test_http_integration.py::test_two_real_http_clients_exchange_messages_over_loopback
+1 failed, 83 passed, 1 skipped, 1 warning in 6.74s

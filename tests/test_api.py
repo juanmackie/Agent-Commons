@@ -50,9 +50,11 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
             client.post("/v1/messages?project=demo", json=original).status_code == 200
         )
         received = client.get("/v1/messages?project=demo&after=0&limit=1")
+        posted_message = sent.json()
+        posted_message.pop("recipient_joined")
         assert received.json() == {
-            "messages": [sent.json()],
-            "next_after": sent.json()["seq"],
+            "messages": [posted_message],
+            "next_after": posted_message["seq"],
         }
         older = client.get(f"/v1/messages?project=demo&before={sent.json()['seq']}")
         assert older.json()["messages"] == []
@@ -103,6 +105,54 @@ def test_room_console_and_allowlisted_assets_are_served(tmp_path):
         assert client.get("/assets/room.css").status_code == 200
         assert client.get("/assets/not-allowlisted.mjs").status_code == 404
         assert client.get("/assets/../main.py").status_code == 404
+
+
+def test_pruned_message_retry_returns_receipt_without_duplicate_or_eviction(tmp_path):
+    from app.store import ProjectStore
+
+    store = ProjectStore(tmp_path / "db.sqlite3", max_messages_per_project=1)
+    with TestClient(create_app(store=store)) as client:
+        client.post("/v1/projects", json={"project": "demo", "agent": "pi"})
+        original = envelope()
+        first = client.post("/v1/messages?project=demo", json=original)
+        newer = client.post(
+            "/v1/messages?project=demo",
+            json=envelope(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14", text="newer"),
+        )
+        replay = client.post("/v1/messages?project=demo", json=original)
+        assert first.status_code == 201 and newer.status_code == 201
+        assert replay.status_code == 200
+        assert replay.json()["seq"] == first.json()["seq"]
+        assert replay.json()["pruned"] is True
+        assert len(client.get("/v1/messages?project=demo&after=0").json()["messages"]) == 1
+        assert client.get("/v1/messages?project=demo&after=0").json()["messages"][0]["seq"] == newer.json()["seq"]
+
+
+def test_message_post_reports_current_recipient_membership_and_rolls_capacity(tmp_path):
+    from app.store import ProjectStore
+
+    store = ProjectStore(tmp_path / "db.sqlite3", max_messages_per_project=1)
+    with TestClient(create_app(store=store)) as client:
+        client.post("/v1/projects", json={"project": "demo", "agent": "pi"})
+        value = envelope(recipient="hermes")
+        first = client.post("/v1/messages?project=demo", json=value)
+        assert first.status_code == 201
+        assert first.json()["recipient_joined"] is False
+
+        client.post("/v1/join", json={"project": "demo", "agent": "hermes"})
+        replay = client.post("/v1/messages?project=demo", json=value)
+        assert replay.status_code == 200
+        assert replay.json()["recipient_joined"] is True
+
+        next_message = client.post(
+            "/v1/messages?project=demo",
+            json=envelope(recipient="hermes", text="next"),
+        )
+        assert next_message.status_code == 201
+        assert next_message.json()["seq"] > first.json()["seq"]
+        messages = client.get("/v1/messages?project=demo&after=0").json()["messages"]
+        assert len(messages) == 1 and messages[0]["seq"] == next_message.json()["seq"]
+        assert next_message.status_code != 507
 
 
 def test_api_validation_bounded_text_and_conflicting_retry(tmp_path):

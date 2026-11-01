@@ -1,5 +1,9 @@
 import importlib.util
 import json
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -280,9 +284,50 @@ def test_state_owner_lock_is_exclusive_and_released_by_owner(tmp_path):
     second_release()
 
 
+def test_concurrent_stale_lock_recovery_leaves_exactly_one_owner(tmp_path):
+    lock_path = tmp_path / "state.owner.lock"
+    lock_path.write_text(json.dumps({"pid": 2_000_000_000, "token": "stale"}), encoding="utf-8")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(plugin.acquire_owner_lock, lock_path) for _ in range(2)]
+        results = []
+        errors = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except FileExistsError as error:
+                errors.append(error)
+    assert len(results) == 1
+    assert len(errors) == 1
+    results[0]()
+
+
+def test_state_owner_lock_refuses_a_recovery_guard_left_by_another_starter(tmp_path):
+    lock_path = tmp_path / "state.owner.lock"
+    guard = Path(str(lock_path) + ".recovery.lock")
+    lock_path.write_text(json.dumps({"pid": 2_000_000_000, "token": "stale"}), encoding="utf-8")
+    guard.write_text(json.dumps({"pid": plugin.os.getpid(), "token": "recovering"}), encoding="utf-8")
+    with pytest.raises(FileExistsError, match="recovery"):
+        plugin.acquire_owner_lock(lock_path)
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["token"] == "stale"
+
+
+def test_state_owner_lock_recovers_dead_pid_and_refuses_live_pid(tmp_path):
+    lock_path = tmp_path / "state.owner.lock"
+    stale_process = subprocess.Popen([sys.executable, "-c", "pass"])
+    stale_pid = stale_process.pid
+    stale_process.wait(timeout=5)
+    lock_path.write_text(json.dumps({"pid": stale_pid, "token": "stale"}), encoding="utf-8")
+    release = plugin.acquire_owner_lock(lock_path)
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["pid"] == plugin.os.getpid()
+    release()
+    lock_path.write_text(json.dumps({"pid": plugin.os.getpid(), "token": "live"}), encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        plugin.acquire_owner_lock(lock_path)
+
+
 def test_state_retains_pending_inbox_and_connection_identity(tmp_path):
     state_file = tmp_path / "state.json"
-    initial = {"cursor": 0, "seen": [], "pending": [], "outbox": [], "closed_threads": [], "fingerprint": "room-a", "session_id": None}
+    initial = {"cursor": 0, "seen": [], "pending": [], "outbox": [], "outbox_notices": [], "closed_threads": [], "fingerprint": "room-a", "session_id": None}
     plugin.save_state(state_file, initial)
     assert plugin.load_state(state_file) == initial
 
@@ -422,6 +467,10 @@ def test_relay_poll_failures_are_actionable_without_logging_relay_data(caplog):
     assert "Agent Commons relay poll failed (RelayError); retrying in 6s" in caplog.text
     assert "relay.invalid" not in caplog.text
     assert "secret message text" not in caplog.text
+    caplog.clear()
+    plugin.log_poll_failure(plugin.RelayError("private detail", status=404), 60)
+    assert "project may be expired or missing, rejoin the project" in caplog.text
+    assert "private detail" not in caplog.text
 
 
 def test_permanent_poll_failure_is_reported_without_exposing_error_text(caplog):
@@ -442,10 +491,203 @@ def test_http_status_classifies_configuration_and_transient_poll_failures(monkey
     with pytest.raises(plugin.RelayError) as failure:
         plugin._request({"api": "https://relay.invalid"}, "GET", "/healthz")
     assert failure.value.retryable is retryable
+    assert failure.value.status == status
     assert "secret" not in str(failure.value)
 
 
+def test_poll_failure_action_retries_only_transient_or_missing_project_errors():
+    assert plugin.poll_failure_action(plugin.RelayError("expired", status=404), 4) == 60
+    assert plugin.poll_failure_action(plugin.RelayError("rejected", status=422), 1) is None
+    assert plugin.poll_failure_action(plugin.RelayError("unauthorized", status=401), 1) is None
+    assert plugin.poll_failure_action(plugin.RelayError("unavailable", status=503, retryable=True), 2) == 12
+    assert plugin.poll_failure_action(OSError("state unavailable"), 2) == 12
+    assert plugin.poll_failure_action(RuntimeError("state unreadable"), 1) is None
+
+
+def test_rejected_outbound_completion_releases_thread_reservation():
+    message = {
+        "client_msg_id": MESSAGE_ID, "recipient": "pi", "thread_id": THREAD,
+        "reply_to": 8, "hop": 1, "text": "finish", "complete": True,
+        "target_session_id": "session-1",
+    }
+    state = {"outbox": [], "closed_threads": []}
+    queued = plugin.queue_outbound_message(state, message)
+    assert queued["closed_threads"] == []
+    assert plugin.outbound_closed_threads(queued) == {THREAD}
+    rejected = plugin.reject_outbound_message(queued, MESSAGE_ID, "rejected")
+    assert plugin.outbound_closed_threads(rejected) == set()
+    later = peer_message(seq=9, client_msg_id="550e8400-e29b-41d4-a716-446655440009")
+    received = plugin.queue_relay_page(
+        {"cursor": 8, "seen": [], "pending": [], "closed_threads": rejected["closed_threads"]},
+        {"messages": [later], "next_after": 9}, "hermes", "session-1",
+    )
+    assert [item["client_msg_id"] for item in received["pending"]] == [later["client_msg_id"]]
+
+
+def test_outbound_rejection_removes_message_and_stores_notice():
+    message = {"client_msg_id": MESSAGE_ID, "recipient": "pi"}
+    state = {"outbox": [message], "outbox_notices": []}
+    notice = "Not sent to pi: HTTP 422"
+    rejected = plugin.reject_outbound_message(state, MESSAGE_ID, notice)
+    assert rejected["outbox"] == []
+    assert rejected["outbox_notices"] == [notice]
+
+
+def test_rejected_outbound_completion_preserves_confirmed_thread_closure():
+    message = {"client_msg_id": MESSAGE_ID, "recipient": "pi", "thread_id": THREAD, "complete": True}
+    state = {"outbox": [message], "outbox_notices": [], "closed_threads": [THREAD], "pending": []}
+    rejected = plugin.reject_outbound_message(state, MESSAGE_ID, "rejected")
+    assert rejected["closed_threads"] == [THREAD]
+    assert plugin.outbound_closed_threads(rejected) == {THREAD}
+
+
+def test_registered_send_rejects_to_durable_notice_and_holds_404(tmp_path, monkeypatch):
+    class FakeContext:
+        def __init__(self):
+            self.hooks = {}
+            self.tools = {}
+        def register_hook(self, name, handler):
+            self.hooks[name] = handler
+        def register_command(self, *_args, **_kwargs):
+            pass
+        def register_tool(self, name, **kwargs):
+            self.tools[name] = kwargs
+
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(plugin, "plugin_settings", lambda: {
+        "api": "https://relay.example.test", "project": "demo", "agent_id": "hermes",
+        "state_path": str(state_file),
+    })
+    context = FakeContext()
+    plugin.register(context)
+    params = {
+        "recipient": "pi", "thread_id": THREAD, "reply_to": None, "hop": 0,
+        "text": "hello", "complete": False, "client_msg_id": MESSAGE_ID,
+    }
+    monkeypatch.setattr(plugin, "send_message", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        plugin.RelayError("relay returned HTTP 422", status=422)
+    ))
+    response = json.loads(context.tools["agent_commons_send"]["handler"](params, session_id="session-1"))
+    assert response["sent"] is False and "HTTP 422" in response["error"]
+    saved = plugin.load_state(state_file)
+    assert saved["outbox"] == [] and len(saved["outbox_notices"]) == 1
+    injected = context.hooks["pre_llm_call"](user_message="human turn")
+    assert "Not sent to pi" in injected["context"]
+    assert plugin.load_state(state_file)["outbox_notices"] == []
+
+    held_id = "550e8400-e29b-41d4-a716-446655440003"
+    held = {**params, "client_msg_id": held_id, "text": "hold me"}
+    monkeypatch.setattr(plugin, "send_message", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        plugin.RelayError("relay returned HTTP 404", status=404)
+    ))
+    queued = json.loads(context.tools["agent_commons_send"]["handler"](held, session_id="session-1"))
+    assert queued["queued"] is True
+    assert [item["client_msg_id"] for item in plugin.load_state(state_file)["outbox"]] == [held_id]
+    conflict = json.loads(context.tools["agent_commons_send"]["handler"](
+        {**held, "text": "changed payload"}, session_id="session-1"
+    ))
+    assert "queued" not in conflict
+    assert "different message" in conflict["error"]
+    assert plugin.load_state(state_file)["outbox"][0]["text"] == "hold me"
+
+
+def test_registered_send_serializes_queue_and_flush_against_background_poller(tmp_path, monkeypatch):
+    class FakeContext:
+        def __init__(self):
+            self.hooks = {}
+            self.tools = {}
+        def register_hook(self, name, handler):
+            self.hooks[name] = handler
+        def register_command(self, *_args, **_kwargs):
+            pass
+        def register_tool(self, name, **kwargs):
+            self.tools[name] = kwargs
+
+    fake_threads = []
+    class FakeThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+            fake_threads.append(self)
+        def start(self):
+            pass
+        def is_alive(self):
+            return False
+
+    class StopPolling(Exception):
+        pass
+
+    real_thread = threading.Thread
+    monkeypatch.setattr(plugin, "plugin_settings", lambda: {
+        "api": "https://relay.example.test", "project": "demo", "agent_id": "hermes",
+        "state_path": str(tmp_path / "state.json"),
+    })
+    monkeypatch.setattr(plugin, "acquire_owner_lock", lambda _path: lambda: None)
+    monkeypatch.setattr(plugin.threading, "Thread", FakeThread)
+    context = FakeContext()
+    plugin.register(context)
+    context.hooks["on_session_start"](session_id="session-1", platform="cli")
+    assert len(fake_threads) == 1
+
+    original_next = plugin.next_outbound_for_session
+    poller_selected_message = threading.Event()
+    def next_outbound(state, session_id):
+        message = original_next(state, session_id)
+        if threading.current_thread().name == "background-poller" and message is not None:
+            poller_selected_message.set()
+        return message
+    monkeypatch.setattr(plugin, "next_outbound_for_session", next_outbound)
+
+    poller_read = threading.Event()
+    def read_page(_config, cursor):
+        poller_read.set()
+        return {"messages": [], "next_after": cursor}
+    monkeypatch.setattr(plugin, "read_page", read_page)
+
+    send_started = threading.Event()
+    release_send = threading.Event()
+    send_calls = []
+    def send_message(*_args, **_kwargs):
+        send_calls.append(1)
+        send_started.set()
+        assert release_send.wait(5)
+        raise plugin.RelayError("relay returned HTTP 422", status=422)
+    monkeypatch.setattr(plugin, "send_message", send_message)
+    monkeypatch.setattr(plugin.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopPolling()))
+
+    params = {
+        "recipient": "pi", "thread_id": THREAD, "reply_to": None, "hop": 0,
+        "text": "hello", "complete": False, "client_msg_id": MESSAGE_ID,
+    }
+    result = []
+    handler = context.tools["agent_commons_send"]["handler"]
+    handler_thread = real_thread(target=lambda: result.append(json.loads(handler(params, session_id="session-1"))))
+    handler_thread.start()
+    def run_poller():
+        try:
+            fake_threads[0].target()
+        except StopPolling:
+            pass
+    poller_thread = real_thread(target=run_poller, name="background-poller")
+    poller_started = False
+    try:
+        assert send_started.wait(5)
+        poller_thread.start()
+        poller_started = True
+        assert poller_read.wait(5)
+        selected_while_send_pending = poller_selected_message.wait(0.2)
+    finally:
+        release_send.set()
+        handler_thread.join(5)
+        if poller_started:
+            poller_thread.join(5)
+    assert not handler_thread.is_alive() and not poller_thread.is_alive()
+    assert selected_while_send_pending is False
+    assert len(send_calls) == 1
+    assert result[0]["sent"] is False and "HTTP 422" in result[0]["error"]
+
+
 def test_truncated_http_response_is_retryable_without_exposing_response_data(monkeypatch):
+
     import http.client
 
     class Response:
@@ -470,6 +712,63 @@ def test_truncated_http_response_is_retryable_without_exposing_response_data(mon
 def test_poll_retry_delay_is_bounded_and_resets_after_success():
     assert [plugin.poll_retry_delay(failures) for failures in range(1, 6)] == [6, 12, 24, 48, 60]
     assert plugin.poll_retry_delay(0) == plugin._POLL_SECONDS
+
+
+def test_registered_cli_poller_retries_missing_project_after_rejoin(tmp_path, monkeypatch):
+    class FakeContext:
+        def __init__(self):
+            self.hooks = {}
+            self.tools = {}
+        def register_hook(self, name, handler):
+            self.hooks[name] = handler
+        def register_command(self, *_args, **_kwargs):
+            pass
+        def register_tool(self, name, **kwargs):
+            self.tools[name] = kwargs
+
+    threads = []
+    class FakeThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+            threads.append(self)
+        def start(self):
+            pass
+        def is_alive(self):
+            return False
+
+    class StopPolling(Exception):
+        pass
+
+    settings = {
+        "api": "https://relay.example.test", "project": "demo", "agent_id": "hermes",
+        "state_path": str(tmp_path / "state.json"),
+    }
+    monkeypatch.setattr(plugin, "plugin_settings", lambda: settings)
+    monkeypatch.setattr(plugin, "acquire_owner_lock", lambda _path: lambda: None)
+    monkeypatch.setattr(plugin.threading, "Thread", FakeThread)
+    context = FakeContext()
+    plugin.register(context)
+
+    read_calls = []
+    def read_page(_config, cursor):
+        read_calls.append(cursor)
+        if len(read_calls) == 1:
+            raise plugin.RelayError("expired", status=404)
+        return {"messages": [], "next_after": cursor}
+    monkeypatch.setattr(plugin, "read_page", read_page)
+    delays = []
+    def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 2:
+            raise StopPolling
+    monkeypatch.setattr(plugin.time, "sleep", sleep)
+
+    context.hooks["on_session_start"](session_id="session-1", platform="cli")
+    assert len(threads) == 1
+    with pytest.raises(StopPolling):
+        threads[0].target()
+    assert len(read_calls) == 2
+    assert delays == [60, plugin._POLL_SECONDS]
 
 
 def test_dashboard_message_uses_exact_existing_session_and_queues_follow_up(monkeypatch):

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { acknowledgeOutboundMessage, acknowledgeRelayMessage, closeRelayThread, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, visiblePendingMessages } from "../src/inbox.mjs";
+import { acknowledgeOutboundMessage, acknowledgeRelayMessage, classifyOutboundFailure, closeRelayThread, closedThreadsForOutbound, hasQueuedOutboundMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, rejectOutboundMessage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const message = (seq, overrides = {}) => ({
   sender: "hermes",
@@ -63,6 +63,57 @@ test("completion durably closes the thread and drops later messages from model d
   assert.equal(queued.cursor, 2);
   const outbound = closeRelayThread(queued, final.thread_id);
   assert.deepEqual(outbound.closedThreads, [final.thread_id]);
+});
+
+test("outbound failures distinguish retry, rejected, and expired-project hold", () => {
+  assert.equal(classifyOutboundFailure({ status: 503 }), "retry");
+  assert.equal(classifyOutboundFailure({ status: 422 }), "reject");
+  assert.equal(classifyOutboundFailure({ status: 409 }), "reject");
+  assert.equal(classifyOutboundFailure({ status: 413 }), "reject");
+  assert.equal(classifyOutboundFailure({ status: 404 }), "hold");
+});
+
+test("rejecting an outbound completion releases the thread and allows later relay messages", () => {
+  const outgoing = {
+    ...message(1), client_msg_id: "id-1", complete: true,
+    recipient: "hermes", target_session_id: "session-1",
+  };
+  const queued = queueOutboundMessage({ ...initial, outbox: [], closedThreads: [] }, outgoing);
+  assert.deepEqual(queued.closedThreads, []);
+  assert.deepEqual(closedThreadsForOutbound(queued), [outgoing.thread_id]);
+  const rejected = rejectOutboundMessage(queued, "id-1");
+  assert.deepEqual(rejected.outbox, []);
+  assert.deepEqual(closedThreadsForOutbound(rejected), []);
+  const later = message(2, { thread_id: outgoing.thread_id, client_msg_id: "id-2" });
+  const received = queueRelayPage(rejected, { messages: [later], next_after: 2 }, "pi", "session-1");
+  assert.equal(received.pendingInbox[0].client_msg_id, "id-2");
+});
+
+test("rejected outbound completion preserves an independently confirmed closure", () => {
+  const incoming = message(3, { complete: true, client_msg_id: "incoming-complete" });
+  const received = queueRelayPage(initial, { messages: [incoming], next_after: 3 }, "pi", "session-1");
+  const acknowledged = acknowledgeRelayMessage(received, incoming.client_msg_id, "session-1");
+  assert.deepEqual(acknowledged.pendingInbox, []);
+
+  const outgoing = {
+    ...message(4), client_msg_id: "outgoing-complete", complete: true,
+    target_session_id: "session-1",
+  };
+  const queued = queueOutboundMessage({ ...acknowledged, outbox: [] }, outgoing);
+  const rejected = rejectOutboundMessage(queued, outgoing.client_msg_id);
+  assert.deepEqual(rejected.closedThreads, [incoming.thread_id]);
+  assert.deepEqual(closedThreadsForOutbound(rejected), [incoming.thread_id]);
+});
+
+test("queued-send detection requires the exact durable envelope", () => {
+  const outgoing = {
+    recipient: "hermes", thread_id: message(1).thread_id, reply_to: null, hop: 0,
+    text: "approved", complete: false, client_msg_id: "stable-id", target_session_id: "session-1",
+  };
+  const state = { ...initial, outbox: [outgoing] };
+  assert.equal(hasQueuedOutboundMessage(state, outgoing), true);
+  assert.equal(hasQueuedOutboundMessage(state, { ...outgoing, text: "changed" }), false);
+  assert.equal(hasQueuedOutboundMessage(state, { ...outgoing, recipient: "other" }), false);
 });
 
 test("approved outbound payload persists with a stable retry ID until acknowledged", () => {

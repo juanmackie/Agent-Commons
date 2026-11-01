@@ -5,7 +5,6 @@ import pytest
 
 from app.store import (
     Conflict,
-    MessageCapacity,
     ProjectCapacity,
     ProjectStore,
     ProjectsExist,
@@ -66,26 +65,118 @@ def test_old_message_database_defaults_delivery_and_preserves_history(tmp_path):
     store = ProjectStore(path, clock=lambda: 101)
     item = store.read("a" * 64, after=0, limit=10)[0][0]
     assert item["text"] == "kept" and item["delivery"] == "follow_up"
+    replay, created = store.post("a" * 64, {
+        "client_msg_id": item["client_msg_id"], "sender": item["sender"],
+        "recipient": item["recipient"], "thread_id": item["thread_id"],
+        "reply_to": item["reply_to"], "hop": item["hop"], "text": item["text"],
+        "complete": item["complete"], "delivery": item["delivery"],
+    })
+    assert not created and replay["seq"] == item["seq"]
 
 
-def test_project_store_rejects_conflicts_foreign_replies_and_capacity():
-    store = ProjectStore(":memory:", max_active_projects=1, max_messages_per_project=1)
+def test_project_store_rolls_retention_without_reusing_sequences():
+    store = ProjectStore(":memory:", max_active_projects=1, max_messages_per_project=2)
     store.create("demo", "pi")
-    original, _ = store.post("demo", message())
+    first, _ = store.post("demo", message())
+    second, _ = store.post(
+        "demo", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14")
+    )
     with pytest.raises(Conflict):
         store.post("demo", message(text="changed"))
     with pytest.raises(ValueError, match="reply_to"):
         store.post(
             "demo",
-            message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14", reply_to=999),
-        )
-    with pytest.raises(MessageCapacity):
-        store.post(
-            "demo", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14")
+            message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15", reply_to=999),
         )
     with pytest.raises(ProjectCapacity):
         store.create("other", "hermes", allow_existing=True)
-    assert store.read("demo", after=0, limit=10)[0] == [original]
+
+    third, created = store.post(
+        "demo",
+        message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15", reply_to=first["seq"]),
+    )
+    assert created and third["seq"] > second["seq"]
+    assert store.read("demo", after=0, limit=10)[0] == [second, third]
+    assert store.read("demo", after=0, before=first["seq"] + 1, limit=10)[0] == []
+
+
+def test_project_database_migrates_missing_pruned_through(tmp_path):
+    path = tmp_path / "legacy-projects.sqlite3"
+    store = ProjectStore(path, clock=lambda: 100)
+    store.create("demo", "pi")
+    store.close()
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE projects DROP COLUMN pruned_through")
+
+    migrated = ProjectStore(path, clock=lambda: 101)
+    columns = {row[1] for row in migrated.db.execute("PRAGMA table_info(projects)")}
+    assert "pruned_through" in columns
+    assert migrated.db.execute(
+        "SELECT pruned_through FROM projects WHERE project_id='demo'"
+    ).fetchone()[0] == 0
+
+
+def test_retry_after_retention_prune_reuses_original_sequence_without_evicting_newer_message():
+    store = ProjectStore(":memory:", max_messages_per_project=1)
+    store.create("demo", "pi")
+    original = message()
+    first, created = store.post("demo", original)
+    assert created
+    newer, created = store.post(
+        "demo", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14", text="newer")
+    )
+    assert created
+
+    replay, created = store.post("demo", original)
+    assert not created
+    assert replay["seq"] == first["seq"]
+    assert replay["pruned"] is True
+    assert store.read("demo", after=0, limit=10)[0] == [newer]
+    with pytest.raises(Conflict):
+        store.post("demo", original | {"text": "changed"})
+
+
+def test_pruned_reply_target_is_accepted_but_unknown_target_is_rejected():
+    store = ProjectStore(":memory:", max_messages_per_project=1)
+    store.create("demo", "pi")
+    first, _ = store.post("demo", message())
+    store.post(
+        "demo", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14")
+    )
+    reply, created = store.post(
+        "demo",
+        message(
+            client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15",
+            reply_to=first["seq"],
+        ),
+    )
+    assert created and reply["reply_to"] == first["seq"]
+    with pytest.raises(ValueError, match="reply_to"):
+        store.post(
+            "demo",
+            message(
+                client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c16",
+                reply_to=999,
+            ),
+        )
+
+
+def test_pruned_reply_target_must_belong_to_the_same_project():
+    store = ProjectStore(":memory:", max_messages_per_project=1)
+    store.create("project-b", "pi")
+    foreign, _ = store.post("project-b", message())
+    store.create("project-a", "pi", allow_existing=True)
+    store.post("project-a", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c14"))
+    store.post("project-a", message(client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c15"))
+
+    with pytest.raises(ValueError, match="reply_to"):
+        store.post(
+            "project-a",
+            message(
+                client_msg_id="cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c16",
+                reply_to=foreign["seq"],
+            ),
+        )
 
 
 def test_concurrent_duplicate_posts_append_once():

@@ -140,6 +140,12 @@ class RelayClient:
         )
         return self._request("GET", "/v1/messages?" + query)
 
+    def read_before(self, before: int, limit: int = 100):
+        query = urllib.parse.urlencode(
+            {"project": self._require_project(), "before": before, "limit": limit}
+        )
+        return self._request("GET", "/v1/messages?" + query)
+
     def post(self, message: dict):
         query = urllib.parse.urlencode({"project": self._require_project()})
         return self._request("POST", "/v1/messages?" + query, message)

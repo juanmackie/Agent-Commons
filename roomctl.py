@@ -113,6 +113,54 @@ def ensure_config_replace_allowed(replace: bool):
                 )
 
 
+def resolve_reply_target(client, seq):
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1 or seq >= (1 << 63) - 1:
+        raise ValueError("reply sequence must be a positive SQLite sequence number")
+    result = client.read_before(seq + 1, limit=1)
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if (
+        not isinstance(messages, list)
+        or not messages
+        or not isinstance(messages[0], dict)
+        or messages[0].get("seq") != seq
+    ):
+        raise RelayError(f"reply target sequence {seq} is pruned or missing; choose a retained message")
+    target = messages[0]
+    try:
+        validate_agent_id(target["sender"])
+        if str(uuid.UUID(target["thread_id"])) != target["thread_id"]:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise RelayError("relay returned an invalid reply target") from None
+    if (
+        not isinstance(target.get("hop"), int)
+        or isinstance(target.get("hop"), bool)
+        or not 0 <= target["hop"] <= 8
+        or not isinstance(target.get("complete"), bool)
+    ):
+        raise RelayError("relay returned an invalid reply target")
+    if target["complete"]:
+        raise RelayError("reply thread is closed; start a new conversation")
+    hop = target["hop"] + 1
+    if hop >= 8:
+        raise RelayError("reply thread reached hop 8; start a new conversation")
+    cursor = 0
+    while True:
+        page = client.read(cursor)
+        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+            raise RelayError("relay returned an invalid reply history page")
+        for message in page["messages"]:
+            if not isinstance(message, dict):
+                raise RelayError("relay returned an invalid reply history message")
+            if message.get("thread_id") == target["thread_id"] and message.get("complete") is True:
+                raise RelayError("reply thread is closed; start a new conversation")
+        next_after = page.get("next_after", cursor)
+        if not page["messages"] or not isinstance(next_after, int) or isinstance(next_after, bool) or next_after <= cursor:
+            break
+        cursor = next_after
+    return target
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="roomctl")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -140,10 +188,11 @@ def main(argv=None):
         help="create this project even though another active project already exists",
     )
     send = commands.add_parser("send")
-    send.add_argument("--to", required=True)
+    send.add_argument("--to")
     send.add_argument("--thread", default=None)
     send.add_argument("--reply-to", type=int, default=None)
     send.add_argument("--text", required=True)
+    send.add_argument("--complete", action="store_true")
     read = commands.add_parser("read")
     read.add_argument("--after", type=int, default=0)
     wait = commands.add_parser("wait", help="wait for a message addressed to this agent")
@@ -306,39 +355,52 @@ def main(argv=None):
         config = read_config()
         client = RelayClient(config["api"], config.get("project"), config["agent_id"])
         if args.command == "send":
+            requested_thread = str(uuid.UUID(args.thread)) if args.thread else None
             db = state_db()
             existing = db.execute(
                 "SELECT client_msg_id,payload FROM pending LIMIT 1"
             ).fetchone()
-            requested_thread = str(uuid.UUID(args.thread)) if args.thread else None
             if existing:
                 old = json.loads(existing[1])
-                if any(
-                    old[key] != value
-                    for key, value in (
-                        ("sender", client.agent_id),
-                        ("recipient", args.to),
-                        ("reply_to", args.reply_to),
-                        ("text", args.text),
-                    )
-                ) or (
-                    requested_thread is not None
-                    and old["thread_id"] != requested_thread
-                ):
+                matches = (
+                    isinstance(old, dict)
+                    and old.get("client_msg_id") == existing[0]
+                    and old.get("sender") == client.agent_id
+                    and (args.to is None or old.get("recipient") == args.to)
+                    and (args.to is not None or args.reply_to is not None)
+                    and old.get("reply_to") == args.reply_to
+                    and old.get("complete") is args.complete
+                    and old.get("text") == args.text
+                    and (requested_thread is None or old.get("thread_id") == requested_thread)
+                    and (args.reply_to is not None or old.get("hop") == 0)
+                )
+                if not matches:
                     raise RelayError(
                         "a previous send is unresolved; retry it exactly before sending another"
                     )
                 payload = old
             else:
+                reply_target = resolve_reply_target(client, args.reply_to) if args.reply_to is not None else None
+                recipient = args.to or (reply_target["sender"] if reply_target else None)
+                if not recipient:
+                    raise ValueError("--to is required unless --reply-to identifies the recipient")
+                validate_agent_id(recipient)
+                if reply_target:
+                    if requested_thread is not None and requested_thread != reply_target["thread_id"]:
+                        raise ValueError("--thread must match the reply target's thread")
+                    requested_thread = reply_target["thread_id"]
+                    reply_hop = reply_target["hop"] + 1
+                else:
+                    reply_hop = 0
                 payload = {
                     "client_msg_id": str(uuid.uuid4()),
                     "sender": client.agent_id,
-                    "recipient": args.to,
+                    "recipient": recipient,
                     "thread_id": requested_thread or str(uuid.uuid4()),
                     "reply_to": args.reply_to,
-                    "hop": 0,
+                    "hop": reply_hop,
                     "text": args.text,
-                    "complete": False,
+                    "complete": args.complete,
                 }
                 db.execute(
                     "INSERT INTO pending VALUES (?,?)",
@@ -357,6 +419,8 @@ def main(argv=None):
         elif args.command == "read":
             print(json.dumps(client.read(args.after), ensure_ascii=False))
         elif args.command == "wait":
+            if config.get("project") is None:
+                raise RelayError("create or join a project first")
             if args.timeout is not None and (
                 not math.isfinite(args.timeout) or args.timeout < 0
             ):
@@ -370,9 +434,12 @@ def main(argv=None):
                     last = client.read(cursor)
                     errors = 0
                 except RelayError as error:
+                    if error.status is not None and 400 <= error.status < 500 and error.status != 429:
+                        if error.status == 404:
+                            raise RelayError("project may be expired or missing; rejoin the project") from None
+                        raise
                     errors += 1
-                    if errors >= 10:
-                        raise error
+                    delay = min(3 * (2 ** min(errors - 1, 5)), 60)
                 else:
                     cursor = last["next_after"]
                     incoming = [
@@ -389,7 +456,8 @@ def main(argv=None):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     break
-                time.sleep(3 if remaining is None else min(3, remaining))
+                delay = 3 if errors == 0 else delay
+                time.sleep(delay if remaining is None else min(delay, remaining))
             last = {"messages": [], "next_after": cursor}
             print(json.dumps(last, ensure_ascii=False), flush=True)
             save_wait_cursor(config, cursor)

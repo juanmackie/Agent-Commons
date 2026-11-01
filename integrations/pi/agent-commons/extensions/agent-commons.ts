@@ -8,7 +8,7 @@ import { loadState, saveState } from "../src/state.mjs";
 import { acquireOwnerLock } from "../src/owner-lock.mjs";
 import { gatePeerToolCall, isRoomctlSend, requiresHumanPermission, shouldGateToolCall } from "../src/permission.mjs";
 import { latestPeerContext, parsePeerMarker } from "../src/peer-context.mjs";
-import { acknowledgeOutboundMessage, acknowledgeRelayMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, visiblePendingMessages } from "../src/inbox.mjs";
+import { acknowledgeOutboundMessage, acknowledgeRelayMessage, classifyOutboundFailure, closedThreadsForOutbound, hasQueuedOutboundMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, rejectOutboundMessage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const POLL_MS = 3000;
 const MAX_POLL_MS = 60_000;
@@ -70,6 +70,7 @@ function contentFromState(message) {
 
 export default function agentCommons(pi) {
   const queuedMessageIds = new Set();
+  const outboundSends = new Map();
   let activePeer = null;
   let currentCtx = null;
   let currentSessionId = null;
@@ -111,6 +112,7 @@ export default function agentCommons(pi) {
       client_msg_id: Type.Optional(Type.String({ description: "Stable UUID for idempotent retry." })),
     }),
     async execute(_id, params) {
+      let outgoing = null;
       try {
         if (!client) client = configuredClient();
         if (!client) throw new Error("Set ROOM_API, ROOM_PROJECT, and AGENT_ID in the environment used to start this Pi session.");
@@ -118,7 +120,7 @@ export default function agentCommons(pi) {
             || getSessionId(currentCtx) !== currentSessionId) {
           throw new Error("This Pi session does not own the Agent Commons inbox; refusing an untracked send.");
         }
-        const outgoing = {
+        outgoing = {
           recipient: params.recipient,
           thread_id: params.thread_id,
           reply_to: params.reply_to ?? null,
@@ -130,12 +132,26 @@ export default function agentCommons(pi) {
         };
         await updateState((current) => queueOutboundMessage(current, outgoing));
         const result = await sendPersistedMessage(outgoing);
-        return {
-          content: [{ type: "text", text: `Sent to ${params.recipient} in thread ${params.thread_id} (relay sequence ${result.seq}).` }],
-          details: { recipient: params.recipient, thread_id: params.thread_id, seq: result.seq },
-        };
+        if (result.kind === "sent") {
+          const recipientWarning = result.receipt.recipient_joined === false
+            ? ` Warning: ${outgoing.recipient} has not joined this project, so no session can receive the message yet.`
+            : "";
+          return {
+            content: [{ type: "text", text: `Sent to ${outgoing.recipient} in thread ${outgoing.thread_id} (relay sequence ${result.receipt.seq}).${recipientWarning}` }],
+            details: { recipient: outgoing.recipient, thread_id: outgoing.thread_id, seq: result.receipt.seq, recipient_joined: result.receipt.recipient_joined },
+          };
+        }
+        if (result.kind === "reject") {
+          return { content: [{ type: "text", text: `Not sent to ${outgoing.recipient}: relay rejected the message (HTTP ${result.error.status}): ${result.error.message}.` }], details: undefined, isError: true };
+        }
+        const hint = result.kind === "hold" ? " The project may be expired or missing; rejoin it to resume delivery." : " It will retry automatically; do not resend.";
+        return { content: [{ type: "text", text: `Queued for ${outgoing.recipient}; the message remains in the durable outbox.${hint} Last error: ${result.error.message}` }], details: { recipient: outgoing.recipient, queued: true }, isError: false };
       } catch (error) {
-        return { content: [{ type: "text", text: `Agent Commons send failed: ${error.message}` }], details: undefined, isError: true };
+        const stillQueued = outgoing && hasQueuedOutboundMessage(state, outgoing);
+        if (stillQueued) {
+          return { content: [{ type: "text", text: `Queued for ${outgoing.recipient}; the message remains in the durable outbox. It will retry automatically; do not resend. Last error: ${error.message}` }], details: { recipient: outgoing.recipient, queued: true }, isError: false };
+        }
+        return { content: [{ type: "text", text: `Not sent: ${error.message}` }], details: undefined, isError: true };
       }
     },
   });
@@ -211,31 +227,67 @@ export default function agentCommons(pi) {
     if (activePeer && (!sessionId || sessionId !== state?.sessionId)) {
       return { block: true, reason: "Peer-requested action blocked because the active Pi session identity does not match the session that owns this relay inbox." };
     }
-    return gatePeerToolCall(event, tool, ctx, activePeer, state?.closedThreads ?? []);
+    return gatePeerToolCall(event, tool, ctx, activePeer, state ? closedThreadsForOutbound(state) : []);
   });
 
   async function persistPage(page) {
     await updateState((current) => queueRelayPage(current, page, client.agentId, current.sessionId));
   }
 
-  async function sendPersistedMessage(message) {
-    const receipt = await client.send({
-      recipient: message.recipient,
-      threadId: message.thread_id,
-      clientMessageId: message.client_msg_id,
-      text: message.text,
-      replyTo: message.reply_to,
-      hop: message.hop,
-      complete: message.complete,
-    });
-    await updateState((current) => acknowledgeOutboundMessage(current, message.client_msg_id));
-    if (message.complete && activePeer?.thread_id === message.thread_id) activePeer = { ...activePeer, complete: true };
-    return receipt;
+  function sendPersistedMessage(message) {
+    const existing = outboundSends.get(message.client_msg_id);
+    if (existing) return existing;
+    const pending = sendPersistedMessageOnce(message);
+    outboundSends.set(message.client_msg_id, pending);
+    void pending.then(
+      () => { if (outboundSends.get(message.client_msg_id) === pending) outboundSends.delete(message.client_msg_id); },
+      () => { if (outboundSends.get(message.client_msg_id) === pending) outboundSends.delete(message.client_msg_id); },
+    );
+    return pending;
+  }
+
+  async function sendPersistedMessageOnce(message) {
+    try {
+      const receipt = await client.send({
+        recipient: message.recipient,
+        threadId: message.thread_id,
+        clientMessageId: message.client_msg_id,
+        text: message.text,
+        replyTo: message.reply_to,
+        hop: message.hop,
+        complete: message.complete,
+      });
+      await updateState((current) => acknowledgeOutboundMessage(current, message.client_msg_id));
+      if (message.complete && activePeer?.thread_id === message.thread_id) activePeer = { ...activePeer, complete: true };
+      return { kind: "sent", receipt };
+    } catch (error) {
+      const kind = classifyOutboundFailure(error);
+      if (kind === "reject") {
+        await updateState((current) => rejectOutboundMessage(current, message.client_msg_id));
+        const notice = `Not sent to ${message.recipient}: the relay rejected this message (HTTP ${error.status}): ${error.message}.`;
+        try {
+          pi.sendMessage({
+            customType: "agent-commons-notice",
+            content: notice,
+            display: true,
+            details: { client_msg_id: message.client_msg_id, recipient: message.recipient, status: error.status, reason: error.message },
+          }, { triggerTurn: false });
+        } catch {
+          currentCtx?.ui.setStatus("agent-commons", notice);
+        }
+      } else if (kind === "hold") {
+        currentCtx?.ui.setStatus("agent-commons", `Queued for ${message.recipient}; the project may be expired or missing. Rejoin the project to resume delivery. The message remains queued; do not resend.`);
+      }
+      return { kind, error };
+    }
   }
 
   async function flushOutbox() {
     const message = state ? nextOutboundForSession(state, currentSessionId) : null;
-    if (message) await sendPersistedMessage(message);
+    if (!message) return;
+    const result = await sendPersistedMessage(message);
+    if (result.kind === "retry") throw result.error;
+    return result;
   }
 
   async function deliverPending() {

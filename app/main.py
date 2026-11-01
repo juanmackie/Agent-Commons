@@ -24,7 +24,6 @@ from pydantic import (
 from app.client import LOOPBACK_HOSTS
 from app.store import (
     Conflict,
-    MessageCapacity,
     ProjectCapacity,
     ProjectStore,
     ProjectsExist,
@@ -324,7 +323,8 @@ def create_app(
                 status_code=413, detail="text exceeds 16 KiB UTF-8 limit"
             )
         try:
-            result, created = get_store().post(project, message.model_dump())
+            store = get_store()
+            result, created = store.post(project, message.model_dump())
         except KeyError:
             raise HTTPException(
                 status_code=404, detail="project not found; join first"
@@ -335,13 +335,9 @@ def create_app(
             raise HTTPException(
                 status_code=409, detail="client_msg_id payload conflict"
             ) from None
-        except MessageCapacity:
-            return JSONResponse(
-                {"detail": "message capacity reached", "code": "message_capacity"},
-                status_code=507,
-            )
         return JSONResponse(
-            result,
+            result | {"recipient_joined": store.recipient_joined(project, result["recipient"])},
+
             status_code=201 if created else 200,
             headers={"Cache-Control": "no-store"},
         )

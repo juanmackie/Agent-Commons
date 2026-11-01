@@ -1,0 +1,251 @@
+Agent Commons local verification
+UTC: 20261101T053731Z
+Scope: project, Hermes-plugin, and Pi-extension tests plus package and static Compose checks; no deployment or live model call
+
+uv 0.11.28 (ebf0f43d7 2026-07-07 x86_64-pc-windows-msvc)
+Checked 29 packages in 3ms
+Resolved 30 packages in 1ms
+Python: 3.12.13
+..........FF...............................s............................. [ 98%]
+.                                                                        [100%]
+================================== FAILURES ===================================
+___________ test_agents_setup_before_first_agent_creates_a_project ____________
+
+tmp_path = WindowsPath('C:/Users/juanm/Documents/GitHub/Agent Commons/pytest-of-juanm/pytest-107/test_agents_setup_before_first0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000011C018A8B30>
+
+    def test_agents_setup_before_first_agent_creates_a_project(tmp_path, monkeypatch):
+        async def scenario():
+            store = ProjectStore(tmp_path / "setup.sqlite3")
+            app = create_app(store=store)
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            host, port = listener.getsockname()
+            server = uvicorn.Server(
+                uicoorn.Config(
+                    app,
+                    host=host,
+                    port=port,
+                    log_level="critical",
+                    access_log=False,
+                    lifespan="off",
+                )
+            )
+            task = asyncio.create_task(server.serve(sockets=[listener]))
+            api = f"http://{host}:{port}"
+            try:
+                for _ in range(200):
+                    if server.started:
+                        break
+                    await asyncio.sleep(0.01)
+                assert server.started, "Uvicorn did not start on loopback"
+                async with httpx.AsyncClient(base_url=api, timeout=5) as client:
+                    setup_page = await client.get("/agent_setup")
+                    assert setup_page.status_code == 200
+                    assert setup_page.headers["content-disposition"] == 'attachment; filename="agent-commons-invite.md"'
+                    assert api in setup_page.text
+                   asssert "python roomctl.py join" in setup_page.text
+                    assert (await client.get("/v1/projects")).json() == {"projects": []}
+    
+                repo = Path(__file__).resolve().parents[1]
+                env_a = os.environ.copy() | {"LOCALAPPDATA": str(tmp_path / "agent-a")}
+                env_b = os.environ.copy() | {"LOCALAPPDATA": str(tmp_path / "agent-b")}
+    
+                async def cli(env, *args):
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        str(repo / "roomctl.py"),
+                        *args,
+                        cwd=repo,
+                        env=env,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await process.communicate()
+                    assert process.returncode == 0, stderr.decode()
+                    return json.loads(stdout)
+    
+                setup_a = await cli(env_a, "setup", "--api", api)
+                setup_b = await cli(env_b, "setup", "--api", api)
+                agent_a = setup_a["agent_id"]
+                agent_b = setup_b["agent_id"]
+                await cli(env_a, "join")
+                await cli(env_b, "join")
+                assert store.projects()[0]["project"] == "agent-commons"
+                assert {member["agent_id"] for member in store.participants("agent-commons")} == {
+                    agent_a,
+                    agent_b,
+                }
+    
+                waiter = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    str(repo / "roomctl.py"),
+                    "wait",
+                    "--timeout",
+                    "5",
+                    cwd=repo,
+                    env=env_a,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                sent = await cli(
+                    env_b, "send", "--to", agent_a, "--text", "setup-check-integration"
+                )
+                stdout, stderr = await asyncio.wait_for(waiter.communicate(), timeout=8)
+                assert waiter.returncode == 0, stderr.decode()
+                received = json.loads(stdout)
+                assert [message["seq"] for message in received["messages"]] == [sent["seq"]]
+    
+                cursor = await cli(env_a, "wait", "--timeout", "0")
+                assert cursor == {"messages": [], "next_after": sent["seq"]}
+            finally:
+                server.should_exit = True
+                try:
+                    await asyncio.wait_for(task, timeout=5)
+                finally:
+                    store.close()
+    
+>       asyncio.run(scenario())
+
+tests\test_http_integration.py:185: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    async def scenario():
+        store = ProjectStore(tmp_path / "setup.sqlite3")
+        app = create_app(store=store)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        host, port = listener.getsockname()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level="critical",
+                access_log=False,
+                lifespan="off",
+            )
+        )
+        task = asyncio.create_task(server.serve(sockets=[listener]))
+        api = f"http://{host}:{port}"
+        try:
+            for _ in range(200):
+                if server.started:
+                    break
+                await asyncio.sleep(0.01)
+            assert server.started, "Uvicorn did not start on loopback"
+            async with httpx.AsyncClient(base_url=api, timeout=5) as client:
+                setup_page = await client.get("/agent_setup")
+                assert setup_page.status_code == 200
+                assert setup_page.headers["content-disposition"] == 'attachment; filename="agent-commons-invite.md"'
+                assert api in setup_page.text
+                assert "python roomctl.py join" in setup_page.text
+                assert (await client.get("/v1/projects")).json() == {"projects": []}
+    
+            repo = Path(__file__).resolve().parents[1]
+            env_a = os.environ.copy() | {"LOCALAPPDATA": str(tmp_path / "agent-a")}
+            env_b = os.environ.copy() | {"LOCALAPPDATA": str(tmp_path / "agent-b")}
+    
+            async def cli(env, *args):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    str(repo / "roomctl.py"),
+                    *args,
+                    cwd=repo,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+                assert process.returncode == 0, stderr.decode()
+                return json.loads(stdout)
+    
+            setup_a = await cli(env_a, "setup", "--api", api)
+            setup_b = await cli(env_b, "setup", "--api", api)
+            agent_a = setup_a["agent_id"]
+            agent_b = setup_b["agent_id"]
+            await cli(env_a, "join")
+            await cli(env_b, "join")
+            assert store.projects()[0]["project"] == "agent-commons
+            assert {member["agent_id"] for member in store.participants("agent-commons")} == {
+                agent_a,
+                agent_b,
+            }
+    
+            waiter = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(repo / "roomctl.py"),
+                "wait",
+                "--timeout",
+                "5",
+                cwd=repo,
+                env=env_a,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            sent = await cli(
+                env_b, "send", "--to", agent_a, "--text", "setup-check-integration"
+            )
+            stdout, stderr = await asyncio.wait_for(waiter.communicate(), timeout=8)
+            assert waiter.returncode == 0, stderr.decode()
+            received = json.loads(stdout)
+>           assert [message["seq"] for message in received["messages"]] == [sent["seq"]]
+E           assert [] == [1]
+E             
+E             Right contains one more item: 1
+E             Use -v to get more diff
+
+tests\test_http_integration.py:174: AssertionError
+____________ test_setup_generates_name_and_rerun_reuses_saved_name ____________
+
+tmp_path = WindowsPath('C:/Users/juanm/Documents/GitHub/Agent Commons/pytest-of-juanm/pytest-106/test_setup_generates_name_and_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001CF73F120F0>
+capsys = <_pytest.capture.CaptureFixture object at 0x000001CF73F10410>
+
+    def test_setup_generates_name_and_rerun_reuses_saved_name(tmp_path, monkeypatch, capsys):
+        path = _config(tmp_path, monkeypatch)
+    
+        class Client:
+            def __init__(self, *_args):
+                pass
+    
+            def healthz(self):
+                return {"status": "ok"}
+    
+        monkeypatch.setattr(roomctl, "RelayClient", Client)
+        assert roomctl.main(["setup", "--api", "https://relay.tailnet"]) == 0
+        first = json.loads(path.read_text())
+>       assert first["agent_id"].startswith("agent-") and len(first["agent_id"]) == 14
+E       AssertionError: assert (False)
+E        +  where False = <built-in method startswith of str object at 0x000001CF73F10030>('agent-')
+E        +    where <built-in method startswith of str object at 0x000001CF73F10030> = 'pi'.startswith
+
+tests\test_roomctl.py:28: AssertionError
+---------------------------- Captured stdout call -----------------------------
+{"api": "https://relay.tailnet", "agent_id": "pi", "config": "C:\\Users\\juanm\\Documents\\GitHub\\Agent Commons\\pytest-of-juanm\\pytest-106\\test_setup_generates_name_and_0\\agent-commons\\config.json"}
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\juanm\Documents\GitHub\Agent Commons\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [1] integrations\hermes\agent-commons\test_plugin.py:51: could not import 'hermes_cli.plugins': No module named 'hermes_cli'
+FAILED tests/test_http_integration.py::test_agents_setup_before_first_agent_creates_a_project
+FAILED tests/test_roomctl.py::test_setup_generates_name_and_rerun_reuses_saved_name
+2 failed, 70 passed, 1 skipped, 1 warning in 8.32s
+

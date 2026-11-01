@@ -3,6 +3,8 @@
 import contextlib
 import datetime
 import hashlib
+import json
+import logging
 import re
 import sqlite3
 import threading
@@ -16,10 +18,6 @@ class Conflict(Exception):
 
 
 class ProjectCapacity(Exception):
-    pass
-
-
-class MessageCapacity(Exception):
     pass
 
 
@@ -94,14 +92,24 @@ class ProjectStore:
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS projects(
             project_id TEXT PRIMARY KEY, room_hash TEXT NOT NULL UNIQUE,
-            created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL);
+            created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL,
+            pruned_through INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS participants(
             project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
             agent_id TEXT NOT NULL, joined_at INTEGER NOT NULL,
             PRIMARY KEY(project_id, agent_id));
           CREATE INDEX IF NOT EXISTS idx_messages_project_seq ON messages(project_id, seq);
           CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_project_client_id ON messages(project_id, client_msg_id) WHERE project_id IS NOT NULL;
+          CREATE TABLE IF NOT EXISTS message_idempotency(
+            project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+            client_msg_id TEXT NOT NULL, seq INTEGER NOT NULL, payload_hash TEXT NOT NULL,
+            recipient TEXT NOT NULL, PRIMARY KEY(project_id,client_msg_id), UNIQUE(project_id,seq));
         """)
+        project_columns = {row[1] for row in self.db.execute("PRAGMA table_info(projects)")}
+        if "pruned_through" not in project_columns:
+            self.db.execute(
+                "ALTER TABLE projects ADD COLUMN pruned_through INTEGER NOT NULL DEFAULT 0"
+            )
         # Existing opaque rooms become projects named by their full, non-secret hash.
         with self._transaction():
             for room in self.db.execute(
@@ -109,7 +117,7 @@ class ProjectStore:
             ).fetchall():
                 project_id = room["room_hash"]
                 self.db.execute(
-                    "INSERT OR IGNORE INTO projects VALUES(?,?,?,?)",
+                    "INSERT OR IGNORE INTO projects(project_id,room_hash,created_at,last_activity) VALUES(?,?,?,?)",
                     (
                         project_id,
                         room["room_hash"],
@@ -120,6 +128,24 @@ class ProjectStore:
                 self.db.execute(
                     "UPDATE messages SET project_id=? WHERE room_hash=? AND project_id IS NULL",
                     (project_id, room["room_hash"]),
+                )
+            for row in self.db.execute(
+                "SELECT * FROM messages WHERE project_id IS NOT NULL"
+            ).fetchall():
+                payload = {
+                    "client_msg_id": row["client_msg_id"],
+                    "sender": row["sender"],
+                    "recipient": row["recipient"],
+                    "thread_id": row["thread_id"],
+                    "reply_to": row["reply_to"],
+                    "hop": row["hop"],
+                    "text": row["text"],
+                    "complete": bool(row["complete"]),
+                    "delivery": row["delivery"],
+                }
+                self.db.execute(
+                    "INSERT OR IGNORE INTO message_idempotency(project_id,client_msg_id,seq,payload_hash,recipient) VALUES(?,?,?,?,?)",
+                    (row["project_id"], row["client_msg_id"], row["seq"], self._payload_hash(payload), row["recipient"]),
                 )
 
     @contextlib.contextmanager
@@ -235,7 +261,7 @@ class ProjectStore:
                     "INSERT INTO rooms VALUES(?,?,?)", (room_hash, now, now)
                 )
                 self.db.execute(
-                    "INSERT INTO projects VALUES(?,?,?,?)",
+                    "INSERT INTO projects(project_id,room_hash,created_at,last_activity) VALUES(?,?,?,?)",
                     (project_id, room_hash, now, now),
                 )
             self.db.execute(
@@ -259,6 +285,15 @@ class ProjectStore:
             for row in rows
         ]
 
+    def recipient_joined(self, project_id: str, agent_id: str) -> bool:
+        now = self.clock()
+        with self._lock:
+            self._project(project_id, now)
+            return self.db.execute(
+                "SELECT 1 FROM participants WHERE project_id=? AND agent_id=?",
+                (project_id, agent_id),
+            ).fetchone() is not None
+
     def participants(self, project_id: str) -> list[dict]:
         now = self.clock()
         with self._lock:
@@ -275,6 +310,11 @@ class ProjectStore:
             for row in rows
         ]
 
+    @staticmethod
+    def _payload_hash(payload):
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def post(self, project_id: str, payload: dict) -> tuple[dict, bool]:
         now = self.clock()
         with self._transaction():
@@ -283,30 +323,67 @@ class ProjectStore:
             payload.setdefault("complete", False)
             payload.setdefault("delivery", "follow_up")
             existing = self.db.execute(
-                "SELECT * FROM messages WHERE project_id=? AND client_msg_id=?",
+                "SELECT seq,payload_hash,recipient FROM message_idempotency WHERE project_id=? AND client_msg_id=?",
                 (project_id, payload["client_msg_id"]),
             ).fetchone()
             if existing:
-                result = self._message(existing)
-                if any(result.get(key) != value for key, value in payload.items()):
+                if existing["payload_hash"] != self._payload_hash(payload):
                     raise Conflict
-                return result, False
-            if (
-                payload["reply_to"] is not None
-                and self.db.execute(
+                row = self.db.execute(
+                    "SELECT * FROM messages WHERE project_id=? AND seq=?",
+                    (project_id, existing["seq"]),
+                ).fetchone()
+                if row:
+                    return self._message(row), False
+                return {
+                    "seq": existing["seq"],
+                    "client_msg_id": payload["client_msg_id"],
+                    "recipient": existing["recipient"],
+                    "pruned": True,
+                }, False
+            if payload["reply_to"] is not None:
+                exists = self.db.execute(
                     "SELECT 1 FROM messages WHERE project_id=? AND seq=?",
                     (project_id, payload["reply_to"]),
                 ).fetchone()
-                is None
-            ):
-                raise ValueError("reply_to must reference a message in this project")
-            if (
+                pruned_through = project["pruned_through"]
+                known_pruned_target = False
+                if (
+                    exists is None
+                    and isinstance(payload["reply_to"], int)
+                    and not isinstance(payload["reply_to"], bool)
+                    and 0 < payload["reply_to"] <= pruned_through
+                ):
+                    known_pruned_target = self.db.execute(
+                        "SELECT 1 FROM message_idempotency WHERE project_id=? AND seq=?",
+                        (project_id, payload["reply_to"]),
+                    ).fetchone() is not None
+                if exists is None and not known_pruned_target:
+                    raise ValueError("reply_to must reference a message in this project")
+            count = self.db.execute(
+                "SELECT COUNT(*) FROM messages WHERE project_id=?", (project_id,)
+            ).fetchone()[0]
+            prune_count = max(0, count - self.max_messages_per_project + 1)
+            if prune_count:
+                pruned = self.db.execute(
+                    "SELECT seq FROM messages WHERE project_id=? ORDER BY seq LIMIT ?",
+                    (project_id, prune_count),
+                ).fetchall()
+                through = max(row["seq"] for row in pruned)
+                self.db.executemany(
+                    "DELETE FROM messages WHERE seq=?",
+                    ((row["seq"],) for row in pruned),
+                )
                 self.db.execute(
-                    "SELECT COUNT(*) FROM messages WHERE project_id=?", (project_id,)
-                ).fetchone()[0]
-                >= self.max_messages_per_project
-            ):
-                raise MessageCapacity
+                    "UPDATE projects SET pruned_through=MAX(pruned_through,?) WHERE project_id=?",
+                    (through, project_id),
+                )
+                logging.getLogger(__name__).info(
+                    "Pruned %s oldest messages for project %s through sequence %s",
+                    prune_count,
+                    project_id,
+                    through,
+                )
             self.db.execute(
                 "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
                 (project_id, payload["sender"], now),
@@ -328,6 +405,10 @@ class ProjectStore:
                     project_id,
                     payload["delivery"],
                 ),
+            )
+            self.db.execute(
+                "INSERT INTO message_idempotency(project_id,client_msg_id,seq,payload_hash,recipient) VALUES(?,?,?,?,?)",
+                (project_id, payload["client_msg_id"], cursor.lastrowid, self._payload_hash(payload), payload["recipient"]),
             )
             self.db.execute(
                 "UPDATE projects SET last_activity=? WHERE project_id=?",

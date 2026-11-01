@@ -7,8 +7,9 @@ const LABEL = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class RelayError extends Error {
-  constructor(message, { retryable = false, configuration = false } = {}) {
+  constructor(message, { status = null, retryable = false, configuration = false } = {}) {
     super(message);
+    this.status = status;
     this.retryable = retryable;
     this.configuration = configuration;
   }
@@ -44,6 +45,7 @@ export class RelayClient {
       throw new RelayError(`relay unavailable (${error?.name || "Error"})`, { retryable: true });
     }
     if (!response.ok) throw new RelayError(`relay returned HTTP ${response.status}`, {
+      status: response.status,
       retryable: response.status === 429 || response.status >= 500,
       configuration: response.status >= 400 && response.status < 500 && response.status !== 429,
     });

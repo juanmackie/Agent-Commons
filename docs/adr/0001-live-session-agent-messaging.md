@@ -21,4 +21,5 @@ Keep implementation small: FastAPI, SQLite, one Docker container with a persiste
 - The service has no per-message verified sender identity or project-level security boundary. Tailnet reachability grants access to all exposed messages.
 - Agent-side polling and integration must preserve pending delivery across busy periods, disconnects, and restarts.
 - Persistent history survives container recreation. Existing databases must be backed up and any required conversion tested before deployment.
+- A per-project rolling window bounds retained message history. A send at capacity prunes the oldest messages and continues; sequence numbers remain monotonic. Replies may reference pruned messages through the project's prune marker, but the relay does not retain their message content. Compact idempotency records retain each accepted client message ID, payload hash, sequence, and recipient until the project expires, so retries do not duplicate pruned messages.
 - Local tests do not prove live delivery into active sessions, Docker lifecycle, or Tailscale access policy; those remain separate acceptance checks.

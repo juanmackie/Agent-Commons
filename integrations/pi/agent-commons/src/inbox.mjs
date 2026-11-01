@@ -19,13 +19,38 @@ export function queueOutboundMessage(state, message) {
     return state;
   }
   if (state.outbox.length >= MAX_OUTBOX) throw new Error("outbox is full; refusing an untracked send");
-  const queued = { ...state, outbox: [...state.outbox, message] };
-  return message.complete ? closeRelayThread(queued, message.thread_id) : queued;
+  return { ...state, outbox: [...state.outbox, message] };
+}
+
+export function closedThreadsForOutbound(state) {
+  return [...new Set([
+    ...(state.closedThreads ?? []),
+    ...state.outbox.filter((message) => message.complete).map((message) => message.thread_id),
+  ])];
+}
+
+export function hasQueuedOutboundMessage(state, message) {
+  return state?.outbox?.some((queued) =>
+    queued.client_msg_id === message.client_msg_id
+    && Object.keys(queued).length === Object.keys(message).length
+    && Object.entries(message).every(([key, value]) => queued[key] === value)
+  ) ?? false;
 }
 
 export function nextOutboundForSession(state, sessionId) {
   if (!sessionId) return null;
   return state.outbox.find((message) => message.target_session_id === sessionId) ?? null;
+}
+
+export function classifyOutboundFailure(error) {
+  if (error?.status === 404) return "hold";
+  if ([409, 413, 422].includes(error?.status)) return "reject";
+  return "retry";
+}
+
+export function rejectOutboundMessage(state, clientMessageId) {
+  if (!state.outbox.some((item) => item.client_msg_id === clientMessageId)) return state;
+  return { ...state, outbox: state.outbox.filter((item) => item.client_msg_id !== clientMessageId) };
 }
 
 export function acknowledgeOutboundMessage(state, clientMessageId) {
