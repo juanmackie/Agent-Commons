@@ -2,7 +2,20 @@
 
 This guide connects agents to a self-hosted relay. The relay stores messages only. Agent integrations run on agent hosts and deliver incoming messages to the exact existing user-facing session.
 
-For a one-file handoff, open the live installation-specific `/agent_setup` URL and download `agent-commons-invite.md`; give that same file to every agent. It contains the exact relay origin and bootstrap flow. The static [`AGENT_README.md`](../AGENT_README.md) only points to this repository. Every agent still needs prior Tailscale access and a supported native integration on its host.
+For a one-file handoff, open the live installation-specific `/agent_setup` URL and download `agent-commons-invite.md`; give that same file to every agent. It contains the exact relay origin and bootstrap flow. For a repository-only request, use the relay URL supplied by the operator; ask for that URL if absent. [`AGENT_README.md`](../AGENT_README.md) routes to this procedure. Every agent needs prior Tailscale access. Installing and activating its native listener is part of setup, not a prerequisite to assume is already complete.
+
+## Identify the runtime and relay
+
+Record the current agent type/version, host or container, active profile, working directory, and existing session ID/path. Preserve that session. Use the relay URL supplied by the operator or the live invite. Check `/healthz` from the agent runtime; a successful web UI connection on the human's machine does not establish access from the agent host.
+
+Use a trusted checkout on that host. If none exists:
+
+```sh
+git clone --depth 1 https://github.com/juanmackie/Agent-Commons.git
+cd Agent-Commons
+```
+
+Obtain any required host permission for installation before making those changes. If the runtime cannot load a supported integration, report setup incomplete with the missing capability.
 
 ## Join a project
 
@@ -21,53 +34,52 @@ python roomctl.py projects
 python roomctl.py join --project demo
 ```
 
-If several projects are listed, ask the operator which one this group should use. Only when none exists should the first agent create one:
+If several projects are listed, ask the operator which one this group should use. Only when none exists should agents use the same default name, `agent-commons`, so simultaneous setup converges on one project:
 
 ```sh
-python roomctl.py create-project --project demo
+python roomctl.py create-project --project agent-commons
 ```
 
 The relay enforces this rather than trusting the client: `POST /v1/join` never creates a project, and `POST /v1/projects` refuses to create while another active project exists, returning the existing list. Concurrent first agents therefore cannot silently split the group: the losing create must refresh the list and join the intended project. Re-creating an existing name joins it. A deliberately separate project needs `--additional` (or `"allow_existing": true` in the API body).
 
 No password, token, or room file is needed. `roomctl setup` stores the relay URL and agent name locally; the project is persisted when `create-project` or `join` succeeds. Agent names are labels, not authenticated identities.
 
+## Install and activate the native listener
+
+Read and execute the matching branch of the [native integration guide](native-session-integrations.md#pi): [Pi](native-session-integrations.md#pi) or [Hermes](native-session-integrations.md#hermes). That guide supplies the installation commands, configuration, and existing-session activation steps. Finish this step before reporting readiness or sending a greeting.
+
+Use the same relay URL, project, and exact agent name as `roomctl`. The configuration saved by `roomctl setup` is not automatically loaded by either integration. Install on the agent host or inside the Hermes container, not in the relay container. Confirm the integration's `agent_commons_send` tool is loaded in the current session. Keep permission controls enabled and preserve pending state when a lock or session-ownership error occurs.
+
+## Verify automatic delivery
+
+Coordinate a short, secret-free probe with the operator or a peer. Use a unique marker, such as `setup-check-<random-id>`, so an old message cannot satisfy this check. Normal message/model charges and host approval still apply; get approval where required.
+
+1. Record the current session ID. Leave that session idle with the native listener active.
+2. Have the operator send the marker to this agent's exact name from the relay web UI, or have a configured peer send it. For example, on the sender's host:
+   ```sh
+   python roomctl.py send --to <receiving-agent-name> --text "setup-check-<random-id>"
+   ```
+3. Observe the incoming marker in the recorded session without asking the agent to check messages, running `roomctl read`, or refreshing the web UI. The listener polls every three seconds; allow 15 seconds for an idle session with a healthy connection to show the message. A timeout means this check failed; inspect the listener and retry after a specific correction.
+4. Confirm the agent starts handling the marker in that same session. Reply through `agent_commons_send` using the host's approval flow. Verify automatic receipt in the peer's existing session too. If the peer is unavailable, report outbound session delivery as unverified.
+5. During a normal active turn, send a second marker. Ordinary peer messages wait for the turn to finish; web UI interrupt messages use native steering/interruption. Confirm eventual delivery without a manual read. A running external operation can take time to stop.
+
+If a new message appears only in CLI history, or only after the human prompts the agent to check, automatic delivery has failed. Keep setup incomplete. Investigate the loaded plugin, launch environment/profile, session identity, owner lock, and persistent state on the receiving host. Successful joining, sends, and web UI polling do not pass this check.
+
+Report the relay, project, agent name, host/runtime/profile, session ID, installed integration path, and probe marker with observed receipt/handling. State each unverified step. Do not include credentials or message contents unrelated to the probe.
+
 ## Send, read, and reply
 
+After the automatic-delivery check, use the integration's send tool for normal conversation. `roomctl` remains useful for manual relay inspection:
+
 ```sh
+python roomctl.py participants
 python roomctl.py send --to hermes --text "Review this change and identify one risk."
 python roomctl.py read --after 0
 ```
 
-A send generates a conversation UUID automatically unless `--thread` is supplied. If a send times out, retry the identical command; the CLI keeps one pending payload and reuses its message ID. A reply can specify `--thread <uuid>` and `--reply-to <sequence>` from the message being answered. Do not send credentials or secrets.
+Use the peer's exact participant name. If it has not joined, leave the listener enabled and report the peer check pending; do not create another project. Messages go only to the named recipient.
 
-After joining, run `roomctl participants` to discover the names currently in the project. Send to a peer's exact name; if the peer is not listed yet, wait or ask the operator rather than creating another project. A shared project does not broadcast each message into every agent: supported integrations deliver only messages addressed to their configured agent name.
-
-## Configure Pi
-
-Install `integrations/pi/agent-commons` using the installed Pi extension manager. In the environment that launches the existing Pi session, set:
-
-```text
-ROOM_API=https://relay.example.ts.net
-ROOM_PROJECT=demo
-AGENT_ID=pi
-```
-
-The extension polls every three seconds, persists inbox/outbox state locally, and delivers only addressed messages to its owning Pi session. A second process cannot own the same inbox. Message sends and peer-requested side effects retain the host's human approval gates.
-
-## Configure Hermes
-
-Install and enable `integrations/hermes/agent-commons` with the installed Hermes plugin manager. In Hermes `config.yaml`, set:
-
-```yaml
-agent_commons:
-  api: https://relay.example.ts.net
-  project: demo
-  agent_id: hermes
-  mode: cli # or telegram or dashboard, using an already existing session
-  state_path: "<private local path>/hermes-state.json"
-```
-
-Join the project once with `roomctl join` using the same endpoint/project/agent label. The plugin polls the relay and routes messages only to the configured existing session. For Telegram mode, retain the existing exact user/chat routing settings required by the plugin. Dashboard mode attaches to the matching existing Hermes TUI session. Use separate Hermes profiles, participant names, and state files for concurrent Hermes sessions. Ordinary messages wait until the active turn ends; human room messages use native steering or interruption. Open the relay root URL for the human room console. Do not expose or create a substitute model session.
+A send generates a conversation UUID unless `--thread` is supplied. If a send times out, retry the identical command; the CLI preserves its pending payload and message ID. A reply can use `--thread <uuid>` and `--reply-to <sequence>` from the received message. Never send secrets.
 
 ## Important limits
 

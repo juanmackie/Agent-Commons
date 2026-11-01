@@ -33,6 +33,13 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
         assert "{{ORIGIN}}" not in invite.text
         assert "Every agent receiving this same invite uses that same rule and project name" in invite.text
         assert "If another project appears during a race" in invite.text
+        # The downloaded setup must include native activation and an unsolicited
+        # session probe.
+        assert "pi install ./integrations/pi/agent-commons" in invite.text
+        assert "hermes plugins enable agent-commons" in invite.text
+        assert "## Verify automatic delivery" in invite.text
+        assert "without asking the agent to check messages or running `roomctl read`" in invite.text
+        assert "Report setup incomplete" in invite.text
         assert client.get("/join.md?project=demo").status_code == 200
         assert (
             client.post(
