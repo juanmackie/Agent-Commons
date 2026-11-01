@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { acknowledgeOutboundMessage, acknowledgeRelayMessage, closeRelayThread, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage } from "../src/inbox.mjs";
+import { acknowledgeOutboundMessage, acknowledgeRelayMessage, closeRelayThread, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const message = (seq, overrides = {}) => ({
   sender: "hermes",
@@ -23,6 +23,21 @@ test("incoming relay data is durable before delivery and remains assigned to its
   assert.equal(nextRelayMessage(queued, "session-2"), null);
   assert.equal(nextRelayMessage(queued, "session-1").client_msg_id, message(1).client_msg_id);
   assert.equal(queueRelayPage(queued, { messages: [message(1)], next_after: 1 }, "pi", "session-1").pendingInbox.length, 1);
+});
+
+test("an interrupt is delivered before older ordinary inbox messages", () => {
+  const ordinary = { ...message(1), target_session_id: "session-1", delivery: "follow_up" };
+  const interrupt = { ...message(2), target_session_id: "session-1", delivery: "interrupt" };
+  const state = { ...initial, pendingInbox: [ordinary, interrupt] };
+  assert.equal(nextRelayMessage(state, "session-1"), interrupt);
+  assert.equal(nextRelayMessage(state, "session-1", new Set([interrupt.client_msg_id])), ordinary);
+});
+
+test("visible prioritized messages are acknowledged even when older messages are not visible", () => {
+  const ordinary = { ...message(1), target_session_id: "session-1", delivery: "follow_up" };
+  const interrupt = { ...message(2), target_session_id: "session-1", delivery: "interrupt" };
+  const state = { ...initial, pendingInbox: [ordinary, interrupt] };
+  assert.deepEqual(visiblePendingMessages(state, "session-1", (id) => id === interrupt.client_msg_id), [interrupt]);
 });
 
 test("messages cannot be queued without a verified target session", () => {

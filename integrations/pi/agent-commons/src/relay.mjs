@@ -76,7 +76,8 @@ export class RelayClient {
         || !(message.reply_to === null || (Number.isSafeInteger(message.reply_to) && message.reply_to >= 0))
         || !Number.isInteger(message.hop) || message.hop < 0 || message.hop > 8
         || typeof message.text !== "string" || !message.text.trim()
-        || Buffer.byteLength(message.text, "utf8") > MAX_TEXT_BYTES || typeof message.complete !== "boolean") {
+        || Buffer.byteLength(message.text, "utf8") > MAX_TEXT_BYTES || typeof message.complete !== "boolean"
+        || (message.delivery !== undefined && !["follow_up", "interrupt"].includes(message.delivery))) {
         throw new RelayError("relay returned an invalid message");
       }
       previousSeq = message.seq;
@@ -95,6 +96,7 @@ export class RelayClient {
     const receipt = await this.#request(`/v1/messages?${query}`, { method: "POST", body: JSON.stringify({
       client_msg_id: clientMessageId, sender: this.agentId, recipient, thread_id: threadId,
       reply_to: replyTo, hop, text, complete,
+      delivery: "follow_up",
     }) });
     if (!receipt || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) throw new RelayError("relay returned an invalid send receipt");
     return receipt;

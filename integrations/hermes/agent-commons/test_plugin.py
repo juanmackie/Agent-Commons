@@ -417,6 +417,95 @@ def test_cli_injection_requires_the_exact_active_hermes_session():
     assert plugin.current_cli_session_id(Manager()) is None
 
 
+def test_dashboard_message_uses_exact_existing_session_and_queues_follow_up(monkeypatch):
+    import sys
+    import threading
+    from types import ModuleType, SimpleNamespace
+
+    class Agent:
+        session_id = "active"
+        def __init__(self):
+            self.steered = []
+            self.interrupts = 0
+        def steer(self, text):
+            self.steered.append(text)
+            return True
+        def interrupt(self):
+            self.interrupts += 1
+
+    agent = Agent()
+    session_transport = object()
+    session = {"agent": agent, "running": True, "history_lock": threading.RLock(), "queued_prompt": None, "transport": session_transport}
+    dispatched = []
+    server = SimpleNamespace(_sessions={"rpc-id": session}, _sessions_lock=threading.RLock(), _enqueue_prompt=lambda s, text, transport: s.update(queued_prompt={"text": text, "transport": transport}), dispatch=lambda request, transport: dispatched.append((request, transport)) or {"ok": True})
+    package = ModuleType("tui_gateway")
+    package.server = server
+    monkeypatch.setitem(sys.modules, "tui_gateway", package)
+
+    assert plugin.inject_dashboard_message("wrong-session", "wrong") is False
+    assert plugin.inject_dashboard_message("active", "human steer", interrupt=True) is True
+    assert agent.steered == []
+    assert agent.interrupts == 1
+    assert session["queued_prompt"]["text"] == "human steer"
+    assert session["queued_prompt"]["transport"] is session_transport
+
+    deferred = set()
+    assert plugin.inject_dashboard_message("active", "do not merge", True, "message-2", deferred) == "deferred"
+    assert session["queued_prompt"]["text"] == "human steer"
+    assert agent.interrupts == 2
+    assert plugin.inject_dashboard_message("active", "do not merge", True, "message-2", deferred) == "deferred"
+    assert agent.interrupts == 2
+    assert plugin.dashboard_has_queued_prompt("active")
+
+    session["queued_prompt"] = None
+    assert not plugin.dashboard_has_queued_prompt("active")
+    assert plugin.inject_dashboard_message("active", "do not merge", True, "message-2", deferred) is True
+    assert session["queued_prompt"]["text"] == "do not merge"
+    assert not deferred
+    assert agent.interrupts == 3
+
+    session["queued_prompt"] = None
+    assert plugin.inject_dashboard_message("active", "human follow-up", interrupt=False) is True
+    assert session["queued_prompt"]["text"] == "human follow-up"
+    assert session["queued_prompt"]["transport"] is session_transport
+    assert agent.interrupts == 3
+
+    session["queued_prompt"] = None
+    session["running"] = False
+    result = plugin.inject_dashboard_message("active", "idle follow-up")
+    assert result is True
+    assert dispatched[0][0]["params"]["session_id"] == "rpc-id"
+    assert dispatched[0][1] is session_transport
+
+    class TurnFinishesAtLockBoundary:
+        def __enter__(self):
+            session["running"] = False
+            return self
+        def __exit__(self, *_args):
+            return False
+
+    session["history_lock"] = TurnFinishesAtLockBoundary()
+    session["running"] = True
+    assert plugin.inject_dashboard_message("active", "no stranded prompt") is True
+    assert len(dispatched) == 2
+
+
+def test_telegram_busy_detection_uses_adapter_active_session_map():
+    import asyncio
+    from types import SimpleNamespace
+    route = {
+        "adapter": SimpleNamespace(_active_sessions={"telegram:42:42": asyncio.Event()}, _pending_messages={}),
+        "session_key": "telegram:42:42",
+        "gateway": SimpleNamespace(_queued_events={}),
+    }
+    assert plugin.gateway_session_is_active(route)
+    route["adapter"]._active_sessions.clear()
+    assert not plugin.gateway_session_is_active(route)
+    route["adapter"]._pending_messages[route["session_key"]] = object()
+    assert plugin.gateway_has_pending_event(route)
+    route["adapter"]._pending_messages.clear()
+    route["gateway"]._queued_events[route["session_key"]] = [object()]
+    assert plugin.gateway_has_pending_event(route)
 def test_gateway_route_requires_existing_session_and_stops_on_replacement(monkeypatch, tmp_path):
     class FakeSessionStore:
         def __init__(self, session_id):
@@ -501,6 +590,8 @@ def test_relay_page_rejects_malformed_envelopes():
         plugin.validate_message(peer_message(hop=9))
     with pytest.raises(plugin.RelayError, match="invalid message"):
         plugin.validate_message(peer_message(complete="false"))
+    with pytest.raises(plugin.RelayError, match="invalid message"):
+        plugin.validate_message(peer_message(delivery=[]))
 
 
 def test_expired_approval_state_is_not_reused():

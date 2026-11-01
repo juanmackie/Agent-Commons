@@ -7,7 +7,7 @@ import { loadState, saveState } from "../src/state.mjs";
 import { acquireOwnerLock } from "../src/owner-lock.mjs";
 import { gatePeerToolCall, isRoomctlSend, requiresHumanPermission, shouldGateToolCall } from "../src/permission.mjs";
 import { latestPeerContext, parsePeerMarker } from "../src/peer-context.mjs";
-import { acknowledgeOutboundMessage, acknowledgeRelayMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage } from "../src/inbox.mjs";
+import { acknowledgeOutboundMessage, acknowledgeRelayMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const POLL_MS = 3000;
 const PEER_MARKER = "[Agent Commons peer delivery ";
@@ -186,11 +186,9 @@ export default function agentCommons(pi) {
     const sessionId = getSessionId(ctx);
     if (!sessionId || sessionId !== state.sessionId) return;
     const branch = ctx.sessionManager.getBranch();
-    const pending = state.pendingInbox.find((item) => item.target_session_id === sessionId);
-    const peer = pending && latestPeerForMessageId(branch, pending.client_msg_id);
-    if (peer) {
-      activePeer = peer;
-      await acknowledgePending(peer, sessionId);
+    for (const pending of visiblePendingMessages(state, sessionId, (id) => Boolean(latestPeerForMessageId(branch, id)))) {
+      const peer = latestPeerForMessageId(branch, pending.client_msg_id);
+      if (peer) await acknowledgePending(peer, sessionId);
     }
   });
 
@@ -266,6 +264,8 @@ export default function agentCommons(pi) {
             complete: true,
           },
         }, { triggerTurn: false });
+      } else if (message.delivery === "interrupt") {
+        pi.sendUserMessage(content, { deliverAs: "steer" });
       } else if (currentCtx.isIdle()) {
         pi.sendUserMessage(content);
       } else {
@@ -333,9 +333,10 @@ export default function agentCommons(pi) {
         const branch = ctx.sessionManager.getBranch();
         const historyPeer = latestPeerContext(branch);
         activePeer = state.peerContext?.complete ? state.peerContext : historyPeer || state.peerContext;
-        const pending = state.pendingInbox.find((item) => item.target_session_id === currentSessionId);
-        const transcriptPeer = pending && latestPeerForMessageId(branch, pending.client_msg_id);
-        if (transcriptPeer) await acknowledgePending(transcriptPeer, currentSessionId);
+        for (const pending of visiblePendingMessages(state, currentSessionId, (id) => Boolean(latestPeerForMessageId(branch, id)))) {
+          const transcriptPeer = latestPeerForMessageId(branch, pending.client_msg_id);
+          if (transcriptPeer) await acknowledgePending(transcriptPeer, currentSessionId);
+        }
         await acknowledgeVisibleCompletions();
       } else {
         ctx.ui.setStatus("agent-commons", "Messages are queued for the original Pi session; resume that session to receive them.");

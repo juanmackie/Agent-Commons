@@ -57,6 +57,9 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
             "messages": [sent.json()],
             "next_after": sent.json()["seq"],
         }
+        older = client.get(f"/v1/messages?project=demo&before={sent.json()['seq']}")
+        assert older.json()["messages"] == []
+        assert client.get(f"/v1/messages?project=demo&after=1&before=2").status_code == 422
         reply = envelope(
             sender="hermes",
             recipient="pi",
@@ -74,6 +77,17 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
         )
         assert client.get("/v1/messages?project=missing").status_code == 404
         assert client.get("/v1/messages?project=demo").status_code == 200
+
+
+def test_room_console_and_allowlisted_assets_are_served(tmp_path):
+    with TestClient(create_app(tmp_path / "db.sqlite3")) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        assert 'id="feed"' in page.text
+        assert 'src="/assets/room.js"' in page.text
+        assert client.get("/assets/room.js").status_code == 200
+        assert client.get("/assets/room.css").status_code == 200
+        assert client.get("/assets/../main.py").status_code == 404
 
 
 def test_api_validation_bounded_text_and_conflicting_retry(tmp_path):

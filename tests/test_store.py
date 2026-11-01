@@ -50,6 +50,22 @@ def test_join_directory_two_way_delivery_retry_and_reopen(tmp_path):
     page, cursor = reopened.read("demo", after=0, limit=1)
     assert page == [first] and cursor == first["seq"]
     assert reopened.read("demo", after=cursor, limit=1)[0] == [reply]
+    assert reopened.read("demo", after=0, before=reply["seq"], limit=1)[0] == [first]
+
+
+def test_old_message_database_defaults_delivery_and_preserves_history(tmp_path):
+    path = tmp_path / "old-schema.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE rooms(room_hash TEXT PRIMARY KEY,created_at INTEGER NOT NULL,last_posted_at INTEGER NOT NULL);
+            CREATE TABLE messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,room_hash TEXT NOT NULL REFERENCES rooms(room_hash),client_msg_id TEXT NOT NULL,sender TEXT NOT NULL,recipient TEXT NOT NULL,thread_id TEXT NOT NULL,reply_to INTEGER,hop INTEGER NOT NULL,text TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,project_id TEXT,UNIQUE(room_hash,client_msg_id));
+        """)
+        room = "a" * 64
+        db.execute("INSERT INTO rooms VALUES(?,?,?)", (room, 100, 100))
+        db.execute("INSERT INTO messages VALUES(1,?,?,?,?,?,?,?,?,?,?,?)", (room,"cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c13","hermes","pi","b3d9dcc7-137c-481f-b268-2a40c7e20c88",None,0,"kept",False,100,room))
+    store = ProjectStore(path, clock=lambda: 101)
+    item = store.read("a" * 64, after=0, limit=10)[0][0]
+    assert item["text"] == "kept" and item["delivery"] == "follow_up"
 
 
 def test_project_store_rejects_conflicts_foreign_replies_and_capacity():

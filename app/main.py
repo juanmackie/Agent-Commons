@@ -5,6 +5,7 @@ import re
 import threading
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -72,6 +73,7 @@ class MessageInput(BaseModel):
     hop: StrictInt = Field(default=0, ge=0, le=8)
     text: StrictStr
     complete: StrictBool = False
+    delivery: Literal["follow_up", "interrupt"] = "follow_up"
 
     @field_validator("client_msg_id", "thread_id")
     @classmethod
@@ -164,6 +166,17 @@ def create_app(
 ) -> FastAPI:
     configured_path = db_path or os.getenv("ROOMS_DB", "/data/rooms.sqlite3")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    from fastapi.responses import FileResponse
+
+    @app.get("/", include_in_schema=False)
+    def room_ui():
+        return FileResponse(Path(__file__).with_name("static") / "index.html")
+
+    @app.get("/assets/{name}", include_in_schema=False)
+    def room_asset(name: str):
+        if name not in {"room.js", "room.css"}:
+            raise HTTPException(status_code=404)
+        return FileResponse(Path(__file__).with_name("static") / name)
     app.add_middleware(BodyLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
     app.state.store = store
     store_lock = threading.Lock()
@@ -325,9 +338,12 @@ def create_app(
         project: str = Query(min_length=1, max_length=64),
         after: int = Query(default=0, ge=0),
         limit: int = Query(default=100, ge=1, le=100),
+        before: int | None = Query(default=None, ge=1),
     ):
+        if before is not None and after != 0:
+            raise HTTPException(status_code=422, detail="before and after cannot be used together")
         try:
-            messages, next_after = get_store().read(project, after=after, limit=limit)
+            messages, next_after = get_store().read(project, after=after, limit=limit, before=before)
         except KeyError:
             raise HTTPException(status_code=404, detail="project not found") from None
         except ValueError as error:

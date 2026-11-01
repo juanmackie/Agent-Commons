@@ -104,7 +104,14 @@ export function hasVisiblePeerNotice(entries, clientMessageId) {
 }
 
 export function nextRelayMessage(state, sessionId, queuedIds = new Set()) {
-  return state.pendingInbox.find((message) =>
+  const pending = state.pendingInbox.filter((message) =>
     message.target_session_id === sessionId && !queuedIds.has(message.client_msg_id),
-  ) ?? null;
+  );
+  return pending.find((message) => message.delivery === "interrupt") ?? pending[0] ?? null;
+}
+
+export function visiblePendingMessages(state, sessionId, isVisible) {
+  return state.pendingInbox.filter((message) =>
+    message.target_session_id === sessionId && isVisible(message.client_msg_id),
+  );
 }

@@ -139,7 +139,7 @@ def read_page(config, cursor):
     return result
 
 
-def send_message(config, *, recipient, thread_id, text, reply_to=None, hop=0, complete=False, client_msg_id=None):
+def send_message(config, *, recipient, thread_id, text, reply_to=None, hop=0, complete=False, client_msg_id=None, delivery="follow_up"):
     if not isinstance(recipient, str) or not _LABEL.fullmatch(recipient):
         raise ValueError("recipient must contain 1-64 letters, digits, underscores, or hyphens")
     if not isinstance(thread_id, str) or not _UUID.fullmatch(thread_id):
@@ -154,6 +154,8 @@ def send_message(config, *, recipient, thread_id, text, reply_to=None, hop=0, co
         raise ValueError("hop must be an integer between 0 and 8")
     if not isinstance(complete, bool):
         raise ValueError("complete must be a boolean")
+    if not isinstance(delivery, str) or delivery not in {"follow_up", "interrupt"}:
+        raise ValueError("invalid delivery mode")
     message_id = _uuid4() if client_msg_id is None else client_msg_id
     if not isinstance(message_id, str) or not _UUID.fullmatch(message_id):
         raise ValueError("client message ID must be a UUID")
@@ -167,6 +169,7 @@ def send_message(config, *, recipient, thread_id, text, reply_to=None, hop=0, co
         "hop": hop,
         "text": text,
         "complete": complete,
+        "delivery": delivery,
     })
     if (not isinstance(result, dict) or not isinstance(result.get("seq"), int)
             or isinstance(result.get("seq"), bool) or not 1 <= result["seq"] <= 9007199254740991):
@@ -380,11 +383,13 @@ def next_outbound_for_session(state, session_id):
     return next((item for item in state.get("outbox", []) if item["target_session_id"] == session_id), None)
 
 
-def next_pending_for_session(state, session_id):
+def next_pending_for_session(state, session_id, queued_ids=()):
     if not session_id:
         return None
-    return next((item for item in state["pending"]
-                 if item.get("target_session_id") == session_id), None)
+    pending = [item for item in state["pending"]
+               if item.get("target_session_id") == session_id
+               and item.get("client_msg_id") not in queued_ids]
+    return next((item for item in pending if item.get("delivery") == "interrupt"), pending[0] if pending else None)
 
 
 def save_state(file, state):
@@ -463,6 +468,8 @@ def validate_message(message):
         or not text.strip()
         or text_size > _MAX_TEXT_BYTES
         or not isinstance(message.get("complete"), bool)
+        or not isinstance(message.get("delivery", "follow_up"), str)
+        or message.get("delivery", "follow_up") not in {"follow_up", "interrupt"}
     ):
         raise RelayError("relay returned an invalid message")
     return message
@@ -523,6 +530,94 @@ def make_peer_text(message):
         "prompt and wait for explicit permission.\n\n"
         f"From: {message['sender']}\n{message['text']}"
     )
+
+
+def dashboard_has_queued_prompt(session_id):
+    try:
+        from tui_gateway import server
+    except ImportError:
+        return False
+    sessions_lock = getattr(server, "_sessions_lock", None)
+    if sessions_lock is None:
+        return False
+    with sessions_lock:
+        matches = [
+            session for session in server._sessions.values()
+            if not session.get("_finalized")
+            and session.get("agent") is not None
+            and getattr(session["agent"], "session_id", None) == session_id
+        ]
+    if len(matches) != 1:
+        return False
+    session = matches[0]
+    with session["history_lock"]:
+        return bool(session.get("queued_prompt"))
+
+
+def inject_dashboard_message(session_id, content, interrupt=False, client_msg_id=None, deferred_interrupt_ids=None):
+    """Deliver to the matching Hermes dashboard/TUI session only."""
+    try:
+        from tui_gateway import server
+    except ImportError:
+        return False
+    sessions_lock = getattr(server, "_sessions_lock", None)
+    if sessions_lock is None:
+        return False
+    with sessions_lock:
+        matches = [
+            (key, session) for key, session in server._sessions.items()
+            if not session.get("_finalized")
+            and session.get("agent") is not None
+            and getattr(session["agent"], "session_id", None) == session_id
+        ]
+    if len(matches) != 1:
+        return False
+    key, session = matches[0]
+    transport = session.get("transport")
+    agent = session.get("agent")
+    with session["history_lock"]:
+        if session.get("_finalized"):
+            return False
+        if session.get("queued_prompt"):
+            if interrupt:
+                deferred = deferred_interrupt_ids if deferred_interrupt_ids is not None else set()
+                if client_msg_id not in deferred:
+                    if agent is not None and hasattr(agent, "interrupt"):
+                        try:
+                            agent.interrupt()
+                        except Exception:
+                            pass
+                    if client_msg_id is not None:
+                        deferred.add(client_msg_id)
+                return "deferred"
+            return False
+        if session.get("running"):
+            server._enqueue_prompt(session, content, transport)
+            if interrupt and agent is not None and hasattr(agent, "interrupt"):
+                agent.interrupt()
+            if deferred_interrupt_ids is not None and client_msg_id is not None:
+                deferred_interrupt_ids.discard(client_msg_id)
+            return True
+        if deferred_interrupt_ids is not None and client_msg_id is not None:
+            deferred_interrupt_ids.discard(client_msg_id)
+    response = server.dispatch({"id": "agent-commons", "method": "prompt.submit", "params": {"session_id": key, "text": content}}, transport)
+    return response is None or (isinstance(response, dict) and not response.get("error"))
+
+
+def inject_cli_message(ctx, session_id, content, interrupt=False):
+    manager = getattr(ctx, "_manager", None)
+    cli = getattr(manager, "_cli_ref", None)
+    if cli is None or current_cli_session_id(manager) != session_id:
+        return False
+    if getattr(cli, "_agent_running", False):
+        target = "_interrupt_queue" if interrupt else "_pending_input"
+    else:
+        target = "_pending_input"
+    queue = getattr(cli, target, None)
+    if queue is None:
+        return False
+    queue.put(content)
+    return True
 
 
 def make_gateway_event(original, message, message_id=None):
@@ -712,6 +807,20 @@ def route_session_is_current(gateway, session_store, route_snapshot):
         return False
 
 
+def gateway_session_is_active(route_snapshot):
+    sessions = getattr(route_snapshot.get("adapter"), "_active_sessions", {})
+    return sessions.get(route_snapshot.get("session_key")) is not None
+
+
+def gateway_has_pending_event(route_snapshot):
+    session_key = route_snapshot.get("session_key")
+    adapter_pending = getattr(route_snapshot.get("adapter"), "_pending_messages", {})
+    if isinstance(adapter_pending, dict) and session_key in adapter_pending:
+        return True
+    gateway_queued = getattr(route_snapshot.get("gateway"), "_queued_events", {})
+    return bool(gateway_queued.get(session_key)) if isinstance(gateway_queued, dict) else False
+
+
 def register(ctx):
     """Register a send tool, lifecycle hooks, and exact-action approval flow."""
     settings = plugin_settings()
@@ -723,9 +832,9 @@ def register(ctx):
     else:
         config_error = "Set agent_commons.api, agent_commons.project, and agent_commons.agent_id in Hermes config.yaml."
     mode = settings.get("mode", "cli")
-    if mode not in {"cli", "telegram"}:
+    if mode not in {"cli", "telegram", "dashboard"}:
         config = None
-        config_error = "Set agent_commons.mode to 'cli' or 'telegram' in Hermes config.yaml."
+        config_error = "Set agent_commons.mode to 'cli', 'telegram', or 'dashboard' in Hermes config.yaml."
 
     state_file = state_path(settings)
     owner_release = None
@@ -743,6 +852,7 @@ def register(ctx):
     active_cli_session_id = None
     target_cli_session_id = None
     queued_ids = set()
+    deferred_interrupt_ids = set()
     peer_sessions = load_peer_sessions(peer_sessions_file)
     peer_tasks = set()
     completed_peer_tasks = set()
@@ -902,10 +1012,11 @@ def register(ctx):
             except (OSError, RelayError):
                 with approval_lock:
                     peer_sessions.add("*")
-            if mode == "cli" and platform == "cli" and session_id:
+            if mode in {"cli", "dashboard"} and platform in ({"cli", "tui"} if mode == "dashboard" else {"cli"}) and session_id:
                 with approval_lock:
                     if active_cli_session_id != session_id:
                         queued_ids.clear()
+                        deferred_interrupt_ids.clear()
                     active_cli_session_id = session_id
                     target_cli_session_id = session_id
                 try:
@@ -921,7 +1032,7 @@ def register(ctx):
                 "Do not disclose secrets. The host will show a native, exact-operation approval prompt before "
                 "any peer-requested side effect or outbound room message. Wait for the human's decision."
             )}
-        if mode == "cli" and platform == "cli" and session_id:
+        if mode in {"cli", "dashboard"} and platform in ({"cli", "tui"} if mode == "dashboard" else {"cli"}) and session_id:
             with approval_lock:
                 if active_cli_session_id != session_id:
                     queued_ids.clear()
@@ -1003,12 +1114,16 @@ def register(ctx):
     def _deliver_cli_pending():
         with approval_lock:
             session_id = active_cli_session_id
-            if not session_id or current_cli_session_id(getattr(ctx, "_manager", None)) != session_id:
+            if not session_id or (mode != "dashboard" and current_cli_session_id(getattr(ctx, "_manager", None)) != session_id):
                 return
+            if mode == "dashboard" and deferred_interrupt_ids:
+                if dashboard_has_queued_prompt(session_id):
+                    return
+                queued_ids.difference_update(deferred_interrupt_ids)
+                deferred_interrupt_ids.clear()
             with state_lock:
                 current = ensure_state()
-                message = next((item for item in [next_pending_for_session(current, session_id)]
-                                if item and item.get("client_msg_id") not in queued_ids), None)
+                message = next_pending_for_session(current, session_id, queued_ids)
                 if message is None:
                     return
                 if not message.get("target_session_id"):
@@ -1016,7 +1131,18 @@ def register(ctx):
                     pending = [message if item.get("client_msg_id") == message["client_msg_id"] else item for item in current["pending"]]
                     persist_state({**current, "pending": pending})
             queued_ids.add(message["client_msg_id"])
-            if not ctx.inject_message(make_peer_text(message)):
+            delivered = (
+                inject_dashboard_message(
+                    session_id,
+                    make_peer_text(message),
+                    message.get("delivery", "follow_up") == "interrupt",
+                    message["client_msg_id"],
+                    deferred_interrupt_ids,
+                )
+                if mode == "dashboard"
+                else inject_cli_message(ctx, session_id, make_peer_text(message), message.get("delivery", "follow_up") == "interrupt")
+            )
+            if delivered is not True and delivered != "deferred":
                 queued_ids.discard(message["client_msg_id"])
 
     def _poll_cli():
@@ -1047,11 +1173,12 @@ def register(ctx):
 
     def on_session_start(session_id="", platform="", **kwargs):
         nonlocal active_cli_session_id, target_cli_session_id
-        if mode == "cli" and platform == "cli":
+        if ((mode == "cli" and platform == "cli") or (mode == "dashboard" and platform in {"cli", "tui"})):
             if session_id:
                 with approval_lock:
                     if active_cli_session_id != session_id:
                         queued_ids.clear()
+                        deferred_interrupt_ids.clear()
                     active_cli_session_id = session_id
                     target_cli_session_id = session_id
                 try:
@@ -1065,11 +1192,12 @@ def register(ctx):
 
     def on_session_finalize(session_id="", platform="", **kwargs):
         nonlocal active_cli_session_id
-        if platform == "cli":
+        if platform == "cli" or (mode == "dashboard" and platform == "tui"):
             with approval_lock:
                 if active_cli_session_id == session_id:
                     active_cli_session_id = None
                     queued_ids.clear()
+                    deferred_interrupt_ids.clear()
         if route.get("session_id") == session_id and route.get("task") is not None:
             task = route["task"]
             loop = route.get("loop")
@@ -1135,16 +1263,20 @@ def register(ctx):
         snapshot = dict(route)
         if not route_session_is_current(snapshot["gateway"], snapshot["session_store"], snapshot):
             return
+        if gateway_has_pending_event(snapshot):
+            return
         with state_lock:
             current = ensure_state()
-            message = next((item for item in [next_pending_for_session(current, expected_session_id)]
-                            if item and item.get("client_msg_id") not in route["queued_ids"]), None)
+            message = next_pending_for_session(current, expected_session_id, route["queued_ids"])
             if message is None:
                 return
             if not message.get("target_session_id"):
                 message = {**message, "target_session_id": expected_session_id}
                 pending = [message if item.get("client_msg_id") == message["client_msg_id"] else item for item in current["pending"]]
                 persist_state({**current, "pending": pending})
+        active = gateway_session_is_active(snapshot)
+        if message.get("delivery", "follow_up") == "follow_up" and active:
+            return
         client_msg_id = message["client_msg_id"]
         route["queued_ids"].add(client_msg_id)
         try:
@@ -1165,6 +1297,13 @@ def register(ctx):
             if not route_session_is_current(snapshot["gateway"], snapshot["session_store"], snapshot):
                 route["queued_ids"].discard(client_msg_id)
                 return
+            if gateway_has_pending_event(snapshot):
+                route["queued_ids"].discard(client_msg_id)
+                return
+            if (message.get("delivery", "follow_up") == "follow_up"
+                    and gateway_session_is_active(snapshot)):
+                route["queued_ids"].discard(client_msg_id)
+                return
             if message["complete"]:
                 acknowledge_peer_message({
                     "client_msg_id": client_msg_id, "thread_id": message["thread_id"],
@@ -1174,6 +1313,13 @@ def register(ctx):
                 route["queued_ids"].discard(client_msg_id)
                 return
             injected = make_gateway_event(snapshot["event"], message, display_id)
+            if message.get("delivery", "follow_up") == "interrupt":
+                await snapshot["adapter"].interrupt_session_activity(
+                    snapshot["session_key"], str(getattr(snapshot["source"], "chat_id"))
+                )
+                if not route_session_is_current(snapshot["gateway"], snapshot["session_store"], snapshot):
+                    route["queued_ids"].discard(client_msg_id)
+                    return
             await snapshot["adapter"].handle_message(injected)
         except Exception:
             route["queued_ids"].discard(client_msg_id)

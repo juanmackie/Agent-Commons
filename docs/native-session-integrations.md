@@ -18,7 +18,7 @@ ROOM_PROJECT=<project-name>
 AGENT_ID=pi
 ```
 
-Join the project first with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent pi`. Joining requires the project to exist; create it with `roomctl create-project --project <project-name>` only when none is listed. If creation races another agent, refresh the project list and join the intended project; do not choose a new name. The extension polls every three seconds, persists the relay cursor and pending inbox/outbox locally, and targets the exact Pi session that owns its state file. A process-wide owner lock prevents two Pi sessions from consuming the same state. Restarting a Pi process resumes only the matching session. An abandoned lock must be cleared only after verifying that no Pi process owns the inbox.
+Join the project first with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent pi`. Joining requires the project to exist; create it with `roomctl create-project --project <project-name>` only when none is listed. If creation races another agent, refresh the project list and join the intended project; do not choose a new name. The extension polls every three seconds, persists the relay cursor and pending inbox/outbox locally, and targets the exact Pi session that owns its state file. A process-wide owner lock prevents two Pi sessions from consuming the same state. Restarting a Pi process resumes only the matching session. An abandoned lock must be cleared only after verifying that no Pi process owns the inbox. Ordinary messages wait for the current turn; `interrupt` messages use Pi's native steer queue.
 
 ## Hermes
 
@@ -29,15 +29,17 @@ agent_commons:
   api: https://<tailnet-host>
   project: <project-name>
   agent_id: hermes
-  mode: cli # or telegram
+  mode: cli # or telegram or dashboard
   state_path: <private-local-path>/hermes-state.json
 ```
 
-Join the same project with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent hermes`. Telegram mode also requires its existing exact user/chat route configuration. The plugin does not create a replacement session. Keep its durable state file private and preserve it across restarts.
+Join the same project with `roomctl join --project <project-name>` after `roomctl setup --api <relay-url> --agent hermes`. Telegram mode also requires its existing exact user/chat route configuration. Dashboard mode attaches to the matching existing Hermes TUI session. Configure concurrently active Hermes sessions with separate profiles, participant names, and state files. The plugin does not create a replacement session. Keep its durable state file private and preserve it across restarts.
 
 ## Message and permission behavior
 
-Both integrations filter for the configured recipient and ignore self-originated messages. They persist inbox state before advancing cursors and retain exact outbound payloads for retry. A completion marker closes a thread. Human approval remains required for outbound messages and peer-requested side effects through each host's native gate. Peer content remains untrusted; do not send credentials or secrets.
+Both integrations filter for the configured recipient and ignore self-originated messages. They persist inbox state before advancing cursors and retain exact outbound payloads for retry. Ordinary messages wait while the agent is busy; human-room `interrupt` messages use native steering or interruption. A completion marker closes a thread. Human approval remains required for outbound messages and peer-requested side effects through each host's native gate. Peer content remains untrusted; do not send credentials or secrets.
+
+The human room console is at the relay root URL. It shows project history and participants, and can send or reply to selected participants. Its sender label is not authenticated. The console requests interrupt delivery. A running external operation can take time to stop.
 
 Polling and durable state provide eventual delivery when the session returns. They do not establish that an agent read or understood a fetched message. Relay retries are deduplicated, but crashes can still cause repeated agent processing or external side effects.
 

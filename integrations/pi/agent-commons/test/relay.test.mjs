@@ -24,7 +24,7 @@ test("relay post validates and sends a bounded project message", async () => {
   }});
   assert.deepEqual(await client.send({recipient:"hermes",threadId:THREAD,clientMessageId:CLIENT_ID,text:"review this",replyTo:12,hop:3,complete:false}),{seq:13});
   assert.equal(request.url,"http://127.0.0.1:8080/v1/messages?project=demo");
-  assert.deepEqual(JSON.parse(request.options.body),{client_msg_id:CLIENT_ID,sender:"pi",recipient:"hermes",thread_id:THREAD,reply_to:12,hop:3,text:"review this",complete:false});
+  assert.deepEqual(JSON.parse(request.options.body),{client_msg_id:CLIENT_ID,sender:"pi",recipient:"hermes",thread_id:THREAD,reply_to:12,hop:3,text:"review this",complete:false,delivery:"follow_up"});
 });
 
 test("relay client refuses unsafe endpoints and invalid message shapes",async()=>{

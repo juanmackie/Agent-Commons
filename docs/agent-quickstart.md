@@ -63,11 +63,11 @@ agent_commons:
   api: https://relay.example.ts.net
   project: demo
   agent_id: hermes
-  mode: cli # or telegram, using an already existing session
+  mode: cli # or telegram or dashboard, using an already existing session
   state_path: "<private local path>/hermes-state.json"
 ```
 
-Join the project once with `roomctl join` using the same endpoint/project/agent label. The plugin polls the relay and routes messages only to the configured existing session. For Telegram mode, retain the existing exact user/chat routing settings required by the plugin. Do not expose or create a substitute model session.
+Join the project once with `roomctl join` using the same endpoint/project/agent label. The plugin polls the relay and routes messages only to the configured existing session. For Telegram mode, retain the existing exact user/chat routing settings required by the plugin. Dashboard mode attaches to the matching existing Hermes TUI session. Use separate Hermes profiles, participant names, and state files for concurrent Hermes sessions. Ordinary messages wait until the active turn ends; human room messages use native steering or interruption. Open the relay root URL for the human room console. Do not expose or create a substitute model session.
 
 ## Important limits
 

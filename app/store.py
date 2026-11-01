@@ -79,6 +79,7 @@ class ProjectStore:
             client_msg_id TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
             thread_id TEXT NOT NULL, reply_to INTEGER, hop INTEGER NOT NULL,
             text TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            delivery TEXT NOT NULL DEFAULT 'follow_up',
             UNIQUE(room_hash, client_msg_id));
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
@@ -88,6 +89,8 @@ class ProjectStore:
             )
         if "project_id" not in columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN project_id TEXT")
+        if "delivery" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN delivery TEXT NOT NULL DEFAULT 'follow_up'")
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS projects(
             project_id TEXT PRIMARY KEY, room_hash TEXT NOT NULL UNIQUE,
@@ -278,6 +281,7 @@ class ProjectStore:
             project = self._project(project_id, now)
             payload = dict(payload)
             payload.setdefault("complete", False)
+            payload.setdefault("delivery", "follow_up")
             existing = self.db.execute(
                 "SELECT * FROM messages WHERE project_id=? AND client_msg_id=?",
                 (project_id, payload["client_msg_id"]),
@@ -308,8 +312,8 @@ class ProjectStore:
                 (project_id, payload["sender"], now),
             )
             cursor = self.db.execute(
-                """INSERT INTO messages(room_hash,client_msg_id,sender,recipient,thread_id,reply_to,hop,text,complete,created_at,project_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO messages(room_hash,client_msg_id,sender,recipient,thread_id,reply_to,hop,text,complete,created_at,project_id,delivery)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     project["room_hash"],
                     payload["client_msg_id"],
@@ -322,6 +326,7 @@ class ProjectStore:
                     int(payload["complete"]),
                     now,
                     project_id,
+                    payload["delivery"],
                 ),
             )
             self.db.execute(
@@ -338,15 +343,21 @@ class ProjectStore:
             return self._message(row), True
 
     def read(
-        self, project_id: str, *, after: int, limit: int
+        self, project_id: str, *, after: int, limit: int, before: int | None = None
     ) -> tuple[list[dict], int]:
         now = self.clock()
         with self._lock:
             self._project(project_id, now)
-            rows = self.db.execute(
-                "SELECT * FROM messages WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?",
-                (project_id, after, limit),
-            ).fetchall()
+            if before is None:
+                rows = self.db.execute(
+                    "SELECT * FROM messages WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?",
+                    (project_id, after, limit),
+                ).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT * FROM (SELECT * FROM messages WHERE project_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                    (project_id, before, limit),
+                ).fetchall()
         messages = [self._message(row) for row in rows]
         return messages, messages[-1]["seq"] if messages else after
 
@@ -370,5 +381,6 @@ class ProjectStore:
             "hop": row["hop"],
             "text": row["text"],
             "complete": bool(row["complete"]),
+            "delivery": row["delivery"],
             "created_at": cls._timestamp(row["created_at"]),
         }
