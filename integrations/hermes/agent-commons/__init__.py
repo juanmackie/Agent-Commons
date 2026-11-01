@@ -7,6 +7,7 @@ import atexit
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,6 +27,7 @@ _MAX_CLOSED_THREADS = 10000
 _MAX_APPROVAL_BYTES = 8 * 1024
 _MAX_HOP = 8
 _POLL_SECONDS = 3
+_LOG = logging.getLogger(__name__)
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 _PEER_MARKER = re.compile(
@@ -39,6 +41,11 @@ _READ_ONLY_TOOLS = {"read_file", "search_files", "find_files"}
 
 class RelayError(RuntimeError):
     pass
+
+
+def log_poll_failure(error):
+    """Report a retryable poll failure without logging relay data or message text."""
+    _LOG.warning("Agent Commons relay poll failed (%s); retrying", type(error).__name__)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1157,9 +1164,9 @@ def register(ctx):
                 if active_cli_session_id:
                     _flush_outbox(active_cli_session_id)
                 _deliver_cli_pending()
-            except Exception:
+            except Exception as error:
                 # Never log message content, endpoint URLs, or exception text.
-                pass
+                log_poll_failure(error)
             time.sleep(_POLL_SECONDS)
 
     def _start_cli_poller():

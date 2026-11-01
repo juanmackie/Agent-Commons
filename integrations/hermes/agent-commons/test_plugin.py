@@ -417,6 +417,13 @@ def test_cli_injection_requires_the_exact_active_hermes_session():
     assert plugin.current_cli_session_id(Manager()) is None
 
 
+def test_relay_poll_failures_are_actionable_without_logging_relay_data(caplog):
+    plugin.log_poll_failure(plugin.RelayError("https://relay.invalid secret message text"))
+    assert "Agent Commons relay poll failed (RelayError); retrying" in caplog.text
+    assert "relay.invalid" not in caplog.text
+    assert "secret message text" not in caplog.text
+
+
 def test_dashboard_message_uses_exact_existing_session_and_queues_follow_up(monkeypatch):
     import sys
     import threading

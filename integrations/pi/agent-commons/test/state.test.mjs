@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -69,6 +69,20 @@ test("corrupt peer provenance fails closed rather than dropping the approval gat
   try {
     await saveState(file, { cursor: 12, seen: [], peerContext: { sender: "hermes", thread_id: "not-a-uuid", seq: 12 } });
     await assert.rejects(loadState(file), /state is unreadable/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("state replacement leaves a complete readable record", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "agent-commons-state-"));
+  const file = path.join(directory, "pi-state.json");
+  try {
+    await writeFile(file, JSON.stringify({ ...defaults, cursor: 1 }));
+    const next = { ...defaults, cursor: 2, seen: ["message-2"] };
+    await saveState(file, next);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), next);
+    assert.deepEqual(await readdir(directory), ["pi-state.json"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

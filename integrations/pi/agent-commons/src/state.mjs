@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -104,11 +104,14 @@ export async function loadState(file, expectedFingerprint = null) {
 export async function saveState(file, state) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(state), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  const handle = await open(temporary, "wx", 0o600);
   try {
+    await handle.writeFile(JSON.stringify(state), "utf8");
+    await handle.sync();
+    await handle.close();
     await rename(temporary, file);
   } catch (error) {
-    const { unlink } = await import("node:fs/promises");
+    await handle.close().catch(() => {});
     await unlink(temporary).catch(() => {});
     throw error;
   }

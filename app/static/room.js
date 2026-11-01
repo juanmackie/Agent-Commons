@@ -171,7 +171,7 @@ $("composer").addEventListener("submit", async event => {
   } else {
     sessionStorage.removeItem(sentKey(submittedProject));
     if ($("text").value === text) $("text").value = "";
-    status(`Sent to ${recipients.length} recipient(s) in ${submittedProject}.`);
+    status(`Accepted by the relay for ${recipients.length} recipient(s) in ${submittedProject}. Session delivery is unconfirmed.`);
     if (project === submittedProject) await refresh();
   }
 });
