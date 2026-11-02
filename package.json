@@ -1,0 +1,11 @@
+{
+  "name": "agent-commons",
+  "private": true,
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
+  },
+  "pi": {
+    "extensions": ["./integrations/pi/agent-commons/extensions/agent-commons.ts"]
+  }
+}

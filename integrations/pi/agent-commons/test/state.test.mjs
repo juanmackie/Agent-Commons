@@ -13,16 +13,20 @@ const peerContext = {
   hop: 2,
   complete: false,
 };
-const defaults = { cursor: 0, seen: [], peerContext: null, pendingInbox: [], outbox: [], closedThreads: [], fingerprint: null, sessionId: null };
+const defaults = { cursor: 0, seen: [], peerContext: null, pendingInbox: [], outbox: [], closedThreads: [], fingerprint: null };
 
-test("peer provenance and cursor survive a Pi session restart", async () => {
+test("cursor survives a Pi restart but peer context is not restored from state", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "agent-commons-state-"));
   const file = path.join(directory, "pi-state.json");
   try {
     assert.deepEqual(await loadState(file), defaults);
     const state = { ...defaults, cursor: 12, seen: ["message-12"], peerContext, sessionId: "session-1", fingerprint: "room-a" };
     await saveState(file, state);
-    assert.deepEqual(await loadState(file), state);
+    const loaded = await loadState(file);
+    assert.equal(loaded.cursor, 12);
+    assert.deepEqual(loaded.seen, ["message-12"]);
+    assert.equal(loaded.peerContext, null);
+    assert.equal("sessionId" in loaded, false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -35,9 +39,9 @@ test("pending relay payload and room identity survive restart, and room changes 
     const message = {
       sender: "hermes", recipient: "pi", thread_id: peerContext.thread_id,
       seq: 13, reply_to: 12, hop: 3, client_msg_id: "550e8400-e29b-41d4-a716-446655440003",
-      text: "queued while busy", complete: false, target_session_id: "session-1",
+      text: "queued while busy", complete: false,
     };
-    await saveState(file, { ...defaults, cursor: 13, pendingInbox: [message], fingerprint: "room-a", sessionId: "session-1" });
+    await saveState(file, { ...defaults, cursor: 13, pendingInbox: [message], fingerprint: "room-a" });
     assert.deepEqual((await loadState(file, "room-a")).pendingInbox, [message]);
     await assert.rejects(loadState(file, "room-b"), /different room or agent/);
   } finally {
@@ -45,30 +49,64 @@ test("pending relay payload and room identity survive restart, and room changes 
   }
 });
 
-test("legacy pending messages bind only to their persisted session owner", async () => {
+test("legacy state keeps queues and cursor while ignoring session-pinned fields", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "agent-commons-state-"));
   const file = path.join(directory, "pi-state.json");
   try {
     const pending = {
       sender: "hermes", recipient: "pi", thread_id: peerContext.thread_id, seq: 13,
       reply_to: 12, hop: 3, client_msg_id: "550e8400-e29b-41d4-a716-446655440003",
-      text: "queued", complete: false,
+      text: "queued", complete: false, target_session_id: "old-session",
     };
-    await saveState(file, { ...defaults, pendingInbox: [pending] });
-    await assert.rejects(loadState(file), /unreadable/);
-    await saveState(file, { ...defaults, pendingInbox: [pending], sessionId: "session-1" });
-    assert.equal((await loadState(file)).pendingInbox[0].target_session_id, "session-1");
+    const outgoing = {
+      recipient: "hermes", thread_id: peerContext.thread_id, reply_to: 13, hop: 4,
+      client_msg_id: "550e8400-e29b-41d4-a716-446655440004", text: "reply",
+      complete: false, target_session_id: "old-session",
+    };
+    await saveState(file, {
+      ...defaults, cursor: 5, seen: [pending.client_msg_id], sessionId: "old-session",
+      pendingInbox: [pending], outbox: [outgoing], closedThreads: [peerContext.thread_id],
+    });
+    const state = await loadState(file);
+    assert.equal(state.cursor, 5);
+    assert.deepEqual(state.seen, [pending.client_msg_id]);
+    assert.deepEqual(state.closedThreads, [peerContext.thread_id]);
+    assert.deepEqual(state.pendingInbox, [{ ...pending, target_session_id: undefined }].map(({ target_session_id, ...rest }) => rest));
+    assert.deepEqual(state.outbox, [{ ...outgoing, target_session_id: undefined }].map(({ target_session_id, ...rest }) => rest));
+    assert.equal("sessionId" in state, false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("corrupt peer provenance fails closed rather than dropping the approval gate", async () => {
+test("legacy state without inbox or outbox fields retains empty queues", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "agent-commons-state-"));
   const file = path.join(directory, "pi-state.json");
   try {
-    await saveState(file, { cursor: 12, seen: [], peerContext: { sender: "hermes", thread_id: "not-a-uuid", seq: 12 } });
-    await assert.rejects(loadState(file), /state is unreadable/);
+    await writeFile(file, JSON.stringify({ cursor: 7, seen: [], fingerprint: "room-a" }));
+    const omitted = await loadState(file, "room-a");
+    assert.equal(omitted.cursor, 7);
+    assert.deepEqual(omitted.pendingInbox, []);
+    assert.deepEqual(omitted.outbox, []);
+
+    await writeFile(file, JSON.stringify({ cursor: 8, seen: [], pendingInbox: null, outbox: null }));
+    const empty = await loadState(file);
+    assert.equal(empty.cursor, 8);
+    assert.deepEqual(empty.pendingInbox, []);
+    assert.deepEqual(empty.outbox, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy peer provenance is ignored instead of gating a clean session", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "agent-commons-state-"));
+  const file = path.join(directory, "pi-state.json");
+  try {
+    await saveState(file, { ...defaults, cursor: 12, peerContext: { sender: "hermes", thread_id: "not-a-uuid", seq: 12 } });
+    const state = await loadState(file);
+    assert.equal(state.cursor, 12);
+    assert.equal(state.peerContext, null);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

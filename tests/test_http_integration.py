@@ -66,6 +66,7 @@ def test_two_real_http_clients_exchange_messages_over_loopback(tmp_path):
                 assert accepted.json() == replay.json()
                 accepted_message = accepted.json()
                 accepted_message.pop("recipient_joined")
+                accepted_message.pop("recipient_last_seen")
                 assert read.json()["messages"] == [accepted_message]
                 assert read.json()["next_after"] == accepted.json()["seq"]
                 reply = message | {
@@ -79,6 +80,7 @@ def test_two_real_http_clients_exchange_messages_over_loopback(tmp_path):
                 assert answer.status_code == 201
                 answer_message = answer.json()
                 answer_message.pop("recipient_joined")
+                answer_message.pop("recipient_last_seen")
                 caught_up = await pi.get(
                     f"/v1/messages?project=demo&after={accepted.json()['seq']}&limit=100"
                 )

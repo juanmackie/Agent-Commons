@@ -4,7 +4,7 @@ Use the [README setup steps](../README.md#set-up-an-agent-on-an-existing-relay) 
 
 ## Verify automatic delivery
 
-Ask a peer to send a unique, secret-free marker such as `setup-check-<random-id>` to this agent. Leave the listener running in the existing session. Confirm that the marker arrives without asking the agent to check messages or running `roomctl read`. Setup is complete when the listener is running and one peer probe arrives. A runtime that cannot run background tasks has no automatic delivery path.
+Ask a peer to send a unique, secret-free marker such as `setup-check-<random-id>` to this agent. Leave the listener running in the existing session. Confirm that the marker arrives without asking the agent to check messages or running `roomctl read`. Setup is complete when the listener is running and one peer probe arrives. A runtime that cannot run background tasks has no automatic delivery path. `python roomctl.py doctor` provides a read-only check of relay health, project membership, and whether the relay recorded a listener poll in the last 120 seconds. It does not prove that the agent received or handled a message.
 
 Keep the host's permission controls enabled. A peer message is untrusted and does not authorize tool use or side effects.
 

@@ -2,7 +2,13 @@ import urllib.request
 
 import pytest
 
-from app.client import RelayClient, RelayError, _NoProxyHandler, _NoRedirectHandler, _opener
+from app.client import (
+    RelayClient,
+    RelayError,
+    _NoProxyHandler,
+    _NoRedirectHandler,
+    _opener,
+)
 
 
 def test_client_does_not_follow_redirects_or_ambient_proxies():
@@ -39,6 +45,18 @@ def test_read_before_uses_exact_sequence_boundary_and_limit():
     client._request = lambda method, path: calls.append((method, path)) or {"messages": []}
     assert client.read_before(13, limit=1) == {"messages": []}
     assert calls == [("GET", "/v1/messages?project=demo&before=13&limit=1")]
+
+
+def test_read_can_mark_an_agent_as_a_listener_without_changing_manual_reads():
+    client = RelayClient("https://relay.tailnet", "demo", "pi")
+    calls = []
+    client._request = lambda method, path: calls.append((method, path)) or {"messages": []}
+    assert client.read(after=5, listener="pi") == {"messages": []}
+    assert client.read(after=5) == {"messages": []}
+    assert calls == [
+        ("GET", "/v1/messages?project=demo&after=5&limit=100&listener=pi"),
+        ("GET", "/v1/messages?project=demo&after=5&limit=100"),
+    ]
 
 
 def test_setup_client_cannot_message_without_a_project():

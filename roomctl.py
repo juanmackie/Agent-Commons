@@ -1,7 +1,6 @@
 """Small CLI for joining a project and sending or reading relay messages."""
 
 import argparse
-from contextlib import contextmanager
 import json
 import math
 import os
@@ -9,6 +8,8 @@ import sqlite3
 import sys
 import time
 import uuid
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 if os.name == "nt":
@@ -161,7 +162,74 @@ def resolve_reply_target(client, seq):
     return target
 
 
+def configure_utf8_output():
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
+def doctor_checks(client, config, *, now=None):
+    checks = []
+    try:
+        health = client.healthz()
+    except RelayError as error:
+        status = f"HTTP {error.status}" if error.status is not None else type(error).__name__
+        return [{"name": "relay", "ok": False, "detail": f"health check failed ({status})"}]
+    checks.append({
+        "name": "relay",
+        "ok": isinstance(health, dict) and health.get("status") == "ok",
+        "detail": "healthy" if isinstance(health, dict) and health.get("status") == "ok" else "health endpoint did not report ok",
+    })
+    if not checks[-1]["ok"]:
+        return checks
+
+    project = config.get("project")
+    if not project:
+        checks.append({"name": "project", "ok": False, "detail": "join a project first"})
+        return checks
+    try:
+        result = client.participants()
+    except RelayError as error:
+        status = f"HTTP {error.status}" if error.status is not None else type(error).__name__
+        checks.append({"name": "participant", "ok": False, "detail": f"lookup failed ({status})"})
+        return checks
+    participants = result.get("participants") if isinstance(result, dict) else None
+    if not isinstance(participants, list):
+        checks.append({"name": "participant", "ok": False, "detail": "relay returned an invalid participant list"})
+        return checks
+    agent_id = config.get("agent_id")
+    participant = next(
+        (item for item in participants if isinstance(item, dict) and item.get("agent_id") == agent_id),
+        None,
+    )
+    if participant is None:
+        checks.append({"name": "participant", "ok": False, "detail": "agent has not joined this project"})
+        return checks
+    checks.append({"name": "participant", "ok": True, "detail": "joined"})
+
+    last_seen = participant.get("last_seen")
+    try:
+        seen_at = datetime.fromisoformat(last_seen)
+        if seen_at.tzinfo is None:
+            raise ValueError("missing timezone")
+    except (AttributeError, TypeError, ValueError):
+        checks.append({"name": "listener", "ok": False, "detail": "no valid listener poll has been recorded"})
+        return checks
+    current_time = time.time() if now is None else now
+    age = max(0.0, current_time - seen_at.timestamp())
+    fresh = age < 120
+    age_display = math.ceil(age)
+    checks.append({
+        "name": "listener",
+        "ok": fresh,
+        "detail": f"last polled {age_display}s ago" if fresh else f"stale; last polled {age_display}s ago",
+    })
+    return checks
+
+
 def main(argv=None):
+    configure_utf8_output()
     parser = argparse.ArgumentParser(prog="roomctl")
     commands = parser.add_subparsers(dest="command", required=True)
     setup = commands.add_parser(
@@ -200,6 +268,7 @@ def main(argv=None):
     commands.add_parser("projects")
     commands.add_parser("participants")
     commands.add_parser("status")
+    commands.add_parser("doctor", help="check relay, project membership, and listener health without changing state")
     args = parser.parse_args(argv)
     try:
         if args.command == "setup":
@@ -345,9 +414,8 @@ def main(argv=None):
                     else:
                         raise
             saved = {"api": api, "project": project, "agent_id": agent}
-            if config_identity(existing) == config_identity(saved):
-                if "cursor" in existing:
-                    saved["cursor"] = existing["cursor"]
+            if config_identity(existing) == config_identity(saved) and "cursor" in existing:
+                saved["cursor"] = existing["cursor"]
             write_config(saved)
             print(json.dumps(result | {"config": str(config_path())}, ensure_ascii=False))
             return 0
@@ -431,7 +499,7 @@ def main(argv=None):
             last = {"messages": [], "next_after": cursor}
             while deadline is None or time.monotonic() < deadline:
                 try:
-                    last = client.read(cursor)
+                    last = client.read(cursor, listener=client.agent_id)
                     errors = 0
                 except RelayError as error:
                     if error.status is not None and 400 <= error.status < 500 and error.status != 429:
@@ -466,6 +534,16 @@ def main(argv=None):
             print(json.dumps(client.participants(), ensure_ascii=False))
         elif args.command == "projects":
             print(json.dumps(client.projects(), ensure_ascii=False))
+        elif args.command == "doctor":
+            checks = doctor_checks(client, config)
+            report = {
+                "ok": all(check["ok"] for check in checks),
+                "agent_id": config.get("agent_id"),
+                "project": config.get("project"),
+                "checks": checks,
+            }
+            print(json.dumps(report, ensure_ascii=False))
+            return 0 if report["ok"] else 1
         else:
             print(
                 json.dumps(

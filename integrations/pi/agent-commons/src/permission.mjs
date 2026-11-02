@@ -5,6 +5,7 @@ const MAX_TEXT_BYTES = 16 * 1024;
 const MAX_HOP = 8;
 const LABEL = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const SECRET_PATTERNS = [
   /\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd|authorization|private[_-]?key)\b\s*[:=]\s*["']?[^\s"',}]{4,}/i,
   /\bBearer\s+[A-Za-z0-9._~+\/-]{12,}/i,
@@ -16,8 +17,8 @@ export function shouldGateToolCall(toolName, peerActive, input) {
   return peerActive || toolName === "agent_commons_send" || isRoomctlSend(toolName, input);
 }
 
-export function requiresHumanPermission(annotations) {
-  return annotations?.readOnlyHint !== true;
+export function requiresHumanPermission(annotations, toolName) {
+  return !READ_ONLY_TOOLS.has(toolName) && annotations?.readOnlyHint !== true;
 }
 
 function* stringsIn(value) {
@@ -72,7 +73,7 @@ function containsSensitiveValue(text) {
 export async function gatePeerToolCall(event, tool, ctx, activePeer = null, closedThreads = []) {
   const outboundSend = tool?.name === "agent_commons_send";
   const shellSend = isRoomctlSend(event.toolName, event.input);
-  if (!outboundSend && !shellSend && !requiresHumanPermission(tool?.annotations)) return undefined;
+  if (!outboundSend && !shellSend && !requiresHumanPermission(tool?.annotations, event.toolName)) return undefined;
 
   if (outboundSend) {
     try {

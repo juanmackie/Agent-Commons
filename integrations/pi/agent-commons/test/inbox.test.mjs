@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { acknowledgeOutboundMessage, acknowledgeRelayMessage, classifyOutboundFailure, closeRelayThread, closedThreadsForOutbound, hasQueuedOutboundMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, rejectOutboundMessage, visiblePendingMessages } from "../src/inbox.mjs";
+import { acknowledgeOutboundMessage, acknowledgeRelayMessage, classifyOutboundFailure, closeRelayThread, closedThreadsForOutbound, hasQueuedOutboundMessage, hasVisiblePeerNotice, nextOutbound, nextRelayMessage, queueOutboundMessage, queueRelayPage, rejectOutboundMessage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const message = (seq, overrides = {}) => ({
   sender: "hermes",
@@ -14,40 +14,41 @@ const message = (seq, overrides = {}) => ({
   complete: false,
   ...overrides,
 });
-const initial = { cursor: 0, seen: [], peerContext: null, pendingInbox: [], sessionId: "session-1" };
+const initial = { cursor: 0, seen: [], peerContext: null, pendingInbox: [], outbox: [], closedThreads: [] };
 
-test("incoming relay data is durable before delivery and remains assigned to its exact session", () => {
-  const queued = queueRelayPage(initial, { messages: [message(1)], next_after: 1 }, "pi", "session-1");
+test("pending relay data is durable and any live owner can deliver it", () => {
+  const queued = queueRelayPage(initial, { messages: [message(1)], next_after: 1 }, "pi");
   assert.equal(queued.cursor, 1);
-  assert.equal(queued.pendingInbox[0].target_session_id, "session-1");
-  assert.equal(nextRelayMessage(queued, "session-2"), null);
-  assert.equal(nextRelayMessage(queued, "session-1").client_msg_id, message(1).client_msg_id);
-  assert.equal(queueRelayPage(queued, { messages: [message(1)], next_after: 1 }, "pi", "session-1").pendingInbox.length, 1);
+  assert.equal("target_session_id" in queued.pendingInbox[0], false);
+  assert.equal(nextRelayMessage(queued).client_msg_id, message(1).client_msg_id);
+  assert.equal(queueRelayPage(queued, { messages: [message(1)], next_after: 1 }, "pi").pendingInbox.length, 1);
 });
 
 test("an interrupt is delivered before older ordinary inbox messages", () => {
-  const ordinary = { ...message(1), target_session_id: "session-1", delivery: "follow_up" };
-  const interrupt = { ...message(2), target_session_id: "session-1", delivery: "interrupt" };
+  const ordinary = { ...message(1), delivery: "follow_up" };
+  const interrupt = { ...message(2), delivery: "interrupt" };
   const state = { ...initial, pendingInbox: [ordinary, interrupt] };
-  assert.equal(nextRelayMessage(state, "session-1"), interrupt);
-  assert.equal(nextRelayMessage(state, "session-1", new Set([interrupt.client_msg_id])), ordinary);
+  assert.equal(nextRelayMessage(state), interrupt);
+  assert.equal(nextRelayMessage(state, new Set([interrupt.client_msg_id])), ordinary);
 });
 
 test("visible prioritized messages are acknowledged even when older messages are not visible", () => {
-  const ordinary = { ...message(1), target_session_id: "session-1", delivery: "follow_up" };
-  const interrupt = { ...message(2), target_session_id: "session-1", delivery: "interrupt" };
+  const ordinary = { ...message(1), delivery: "follow_up" };
+  const interrupt = { ...message(2), delivery: "interrupt" };
   const state = { ...initial, pendingInbox: [ordinary, interrupt] };
-  assert.deepEqual(visiblePendingMessages(state, "session-1", (id) => id === interrupt.client_msg_id), [interrupt]);
+  assert.deepEqual(visiblePendingMessages(state, (id) => id === interrupt.client_msg_id), [interrupt]);
 });
 
-test("messages cannot be queued without a verified target session", () => {
-  assert.throws(() => queueRelayPage(initial, { messages: [message(1)], next_after: 1 }, "pi", null), /target session identity/);
+test("old pending messages without a current session marker remain deliverable", () => {
+  const old = { ...message(1), target_session_id: "closed-session" };
+  const state = { ...initial, pendingInbox: [old] };
+  assert.equal(nextRelayMessage(state).client_msg_id, old.client_msg_id);
 });
 
 test("full inbox does not advance past an unpersisted target message", () => {
-  const existing = Array.from({ length: 100 }, (_, index) => ({ ...message(index + 1), target_session_id: "session-1" }));
+  const existing = Array.from({ length: 100 }, (_, index) => message(index + 1));
   const state = { ...initial, cursor: 100, pendingInbox: existing };
-  const result = queueRelayPage(state, { messages: [message(101), message(102)], next_after: 102 }, "pi", "session-1");
+  const result = queueRelayPage(state, { messages: [message(101), message(102)], next_after: 102 }, "pi");
   assert.equal(result.cursor, 100);
   assert.equal(result.pendingInbox.length, 100);
 });
@@ -55,7 +56,7 @@ test("full inbox does not advance past an unpersisted target message", () => {
 test("completion durably closes the thread and drops later messages from model delivery", () => {
   const final = message(1, { complete: true });
   const later = message(2, { client_msg_id: "550e8400-e29b-41d4-a716-446655440004", text: "late reply" });
-  const queued = queueRelayPage(initial, { messages: [final, later], next_after: 2 }, "pi", "session-1");
+  const queued = queueRelayPage(initial, { messages: [final, later], next_after: 2 }, "pi");
   assert.deepEqual(queued.closedThreads, [final.thread_id]);
   assert.equal(queued.pendingInbox.length, 1);
   assert.equal(queued.pendingInbox[0].complete, true);
@@ -76,7 +77,7 @@ test("outbound failures distinguish retry, rejected, and expired-project hold", 
 test("rejecting an outbound completion releases the thread and allows later relay messages", () => {
   const outgoing = {
     ...message(1), client_msg_id: "id-1", complete: true,
-    recipient: "hermes", target_session_id: "session-1",
+    recipient: "hermes",
   };
   const queued = queueOutboundMessage({ ...initial, outbox: [], closedThreads: [] }, outgoing);
   assert.deepEqual(queued.closedThreads, []);
@@ -85,19 +86,18 @@ test("rejecting an outbound completion releases the thread and allows later rela
   assert.deepEqual(rejected.outbox, []);
   assert.deepEqual(closedThreadsForOutbound(rejected), []);
   const later = message(2, { thread_id: outgoing.thread_id, client_msg_id: "id-2" });
-  const received = queueRelayPage(rejected, { messages: [later], next_after: 2 }, "pi", "session-1");
+  const received = queueRelayPage(rejected, { messages: [later], next_after: 2 }, "pi");
   assert.equal(received.pendingInbox[0].client_msg_id, "id-2");
 });
 
 test("rejected outbound completion preserves an independently confirmed closure", () => {
   const incoming = message(3, { complete: true, client_msg_id: "incoming-complete" });
-  const received = queueRelayPage(initial, { messages: [incoming], next_after: 3 }, "pi", "session-1");
-  const acknowledged = acknowledgeRelayMessage(received, incoming.client_msg_id, "session-1");
+  const received = queueRelayPage(initial, { messages: [incoming], next_after: 3 }, "pi");
+  const acknowledged = acknowledgeRelayMessage(received, incoming.client_msg_id);
   assert.deepEqual(acknowledged.pendingInbox, []);
 
   const outgoing = {
     ...message(4), client_msg_id: "outgoing-complete", complete: true,
-    target_session_id: "session-1",
   };
   const queued = queueOutboundMessage({ ...acknowledged, outbox: [] }, outgoing);
   const rejected = rejectOutboundMessage(queued, outgoing.client_msg_id);
@@ -108,7 +108,7 @@ test("rejected outbound completion preserves an independently confirmed closure"
 test("queued-send detection requires the exact durable envelope", () => {
   const outgoing = {
     recipient: "hermes", thread_id: message(1).thread_id, reply_to: null, hop: 0,
-    text: "approved", complete: false, client_msg_id: "stable-id", target_session_id: "session-1",
+    text: "approved", complete: false, client_msg_id: "stable-id",
   };
   const state = { ...initial, outbox: [outgoing] };
   assert.equal(hasQueuedOutboundMessage(state, outgoing), true);
@@ -121,12 +121,10 @@ test("approved outbound payload persists with a stable retry ID until acknowledg
     recipient: "hermes", thread_id: message(1).thread_id, reply_to: 8, hop: 1,
     text: "approved text", complete: true,
     client_msg_id: "550e8400-e29b-41d4-a716-446655440099",
-    target_session_id: "session-1",
   };
   const queued = queueOutboundMessage({ ...initial, outbox: [] }, outgoing);
   assert.deepEqual(queued.outbox, [outgoing]);
-  assert.equal(nextOutboundForSession(queued, "session-2"), null);
-  assert.deepEqual(nextOutboundForSession(queued, "session-1"), outgoing);
+  assert.deepEqual(nextOutbound(queued), outgoing);
   assert.deepEqual(queueOutboundMessage(queued, outgoing), queued);
   assert.throws(() => queueOutboundMessage(queued, { ...outgoing, text: "changed after approval" }), /different message/);
   const sent = acknowledgeOutboundMessage(queued, outgoing.client_msg_id);
@@ -144,10 +142,8 @@ test("completion notices are visible in session history without a user-model tur
 });
 
 test("acknowledgment is one-session-only and marks the relay message seen", () => {
-  const queued = queueRelayPage(initial, { messages: [message(1)], next_after: 1 }, "pi", "session-1");
-  const wrongSession = acknowledgeRelayMessage(queued, message(1).client_msg_id, "session-2");
-  assert.equal(wrongSession, queued);
-  const received = acknowledgeRelayMessage(queued, message(1).client_msg_id, "session-1");
+  const queued = queueRelayPage(initial, { messages: [message(1)], next_after: 1 }, "pi");
+  const received = acknowledgeRelayMessage(queued, message(1).client_msg_id);
   assert.deepEqual(received.pendingInbox, []);
   assert.deepEqual(received.seen, [message(1).client_msg_id]);
   assert.equal(received.peerContext.client_msg_id, message(1).client_msg_id);

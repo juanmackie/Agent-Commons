@@ -22,10 +22,14 @@ trap 'rm -rf -- "$tmpdir"' EXIT
   uv run --frozen python -m pytest -q -p no:cacheprovider
   node --test integrations/pi/agent-commons/test/*.test.mjs
   uv run --frozen python - <<'PY'
-from pathlib import Path
+import json
 import re
+from pathlib import Path
 import yaml
 
+pi_package = json.loads(Path("package.json").read_text(encoding="utf-8"))
+assert pi_package["pi"]["extensions"] == ["./integrations/pi/agent-commons/extensions/agent-commons.ts"]
+assert pi_package["peerDependencies"]["@earendil-works/pi-ai"] == "*"
 compose = yaml.safe_load(Path("deploy/compose.yaml").read_text(encoding="utf-8"))
 assert set(compose["services"]) == {"relay"}
 service = compose["services"]["relay"]

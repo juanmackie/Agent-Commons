@@ -1,10 +1,56 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { RelayClient } from "../src/relay.mjs";
+import { configuredRelayClient, recipientPollWarning, RelayClient } from "../src/relay.mjs";
 
 const THREAD = "b3d9dcc7-137c-481f-b268-2a40c7e20c88";
 const CLIENT_ID = "cbb2bf4c-2ae5-45f4-87b1-4b7c0e0c7c13";
 const config = { api:"https://relay.example.test", project:"demo", agentId:"pi" };
+
+test("Pi reads roomctl config when env variables are unset and lets env override it", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "agent-commons-config-"));
+  try {
+    const configDirectory = path.join(directory, "agent-commons");
+    await mkdir(configDirectory);
+    await writeFile(path.join(configDirectory, "config.json"), JSON.stringify({
+      api: "https://relay.example.test", project: "demo", agent_id: "pi",
+    }));
+    const env = { LOCALAPPDATA: directory };
+    const fromFile = await configuredRelayClient(env);
+    assert.deepEqual(
+      { api: fromFile.baseUrl, project: fromFile.project, agentId: fromFile.agentId },
+      { api: "https://relay.example.test", project: "demo", agentId: "pi" },
+    );
+    const overridden = await configuredRelayClient({
+      ...env, ROOM_PROJECT: "other", AGENT_ID: "pi-2",
+    });
+    assert.deepEqual(
+      { project: overridden.project, agentId: overridden.agentId },
+      { project: "other", agentId: "pi-2" },
+    );
+    await writeFile(path.join(configDirectory, "config.json"), "not-json");
+    const explicit = await configuredRelayClient({
+      ...env, ROOM_API: "https://explicit.example.test", ROOM_PROJECT: "explicit", AGENT_ID: "pi-3",
+    });
+    assert.deepEqual(
+      { api: explicit.baseUrl, project: explicit.project, agentId: explicit.agentId },
+      { api: "https://explicit.example.test", project: "explicit", agentId: "pi-3" },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("send receipts warn only when recipient poll time is absent or at least two minutes old", () => {
+  const now = Date.parse("2026-11-02T00:00:00Z");
+  assert.equal(recipientPollWarning({}, "hermes", now), "");
+  assert.match(recipientPollWarning({ recipient_last_seen: null }, "hermes", now), /never polled/);
+  assert.equal(recipientPollWarning({ recipient_last_seen: "2026-11-01T23:59:00Z" }, "hermes", now), "");
+  assert.match(recipientPollWarning({ recipient_last_seen: "2026-11-01T23:58:00Z" }, "hermes", now), /2 minutes/);
+  assert.equal(recipientPollWarning({ recipient_last_seen: "invalid" }, "hermes", now), "");
+});
 
 test("relay poll uses project addressing and no application credential", async () => {
   let request;

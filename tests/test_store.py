@@ -5,9 +5,10 @@ import pytest
 
 from app.store import (
     Conflict,
+    NotParticipant,
     ProjectCapacity,
-    ProjectStore,
     ProjectsExist,
+    ProjectStore,
 )
 
 
@@ -282,3 +283,58 @@ def test_join_keeps_a_project_alive_without_any_message():
     now[0] = 150
     assert [entry["project"] for entry in store.projects()] == ["crew"]
     assert [p["agent_id"] for p in store.participants("crew")] == ["hermes", "pi"]
+
+
+def test_listener_poll_throttles_last_seen_but_refreshes_project_activity():
+    now = [0]
+    store = ProjectStore(":memory:", idle_ttl_seconds=100, clock=lambda: now[0])
+    store.create("crew", "pi")
+    store.join("crew", "hermes")
+
+    assert store.read("crew", after=0, limit=100, listener="hermes")[1] == 0
+    assert {p["agent_id"]: p["last_seen"] for p in store.participants("crew")} == {
+        "hermes": "1970-01-01T00:00:00Z", "pi": None,
+    }
+    now[0] = 29
+    store.read("crew", after=0, limit=100, listener="hermes")
+    assert {p["agent_id"]: p["last_seen"] for p in store.participants("crew")}[
+        "hermes"
+    ] == "1970-01-01T00:00:00Z"
+    now[0] = 30
+    store.read("crew", after=0, limit=100, listener="hermes")
+    assert {p["agent_id"]: p["last_seen"] for p in store.participants("crew")}[
+        "hermes"
+    ] == "1970-01-01T00:00:30Z"
+
+    now[0] = 120
+    store.read("crew", after=0, limit=100, listener="hermes")
+    now[0] = 150
+    assert [entry["project"] for entry in store.projects()] == ["crew"]
+
+
+def test_manual_read_does_not_mark_listener_and_unjoined_listener_is_rejected():
+    store = ProjectStore(":memory:", clock=lambda: 100)
+    store.create("crew", "pi")
+    store.read("crew", after=0, limit=100)
+    assert store.participants("crew")[0]["last_seen"] is None
+    with pytest.raises(NotParticipant, match="listener must be a project participant"):
+        store.read("crew", after=0, limit=100, listener="hermes")
+
+
+def test_participant_last_seen_is_nullable_and_migrates_existing_rows(tmp_path):
+    path = tmp_path / "participants-before-last-seen.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE projects(project_id TEXT PRIMARY KEY, room_hash TEXT NOT NULL UNIQUE,
+              created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL);
+            CREATE TABLE participants(project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+              joined_at INTEGER NOT NULL, PRIMARY KEY(project_id, agent_id));
+            INSERT INTO projects VALUES('crew', 'a', 1, 1);
+            INSERT INTO participants VALUES('crew', 'pi', 1);
+        """)
+    store = ProjectStore(path, clock=lambda: 2)
+    columns = {row[1] for row in store.db.execute("PRAGMA table_info(participants)")}
+    assert "last_seen" in columns
+    assert store.participants("crew") == [{
+        "agent_id": "pi", "joined_at": "1970-01-01T00:00:01Z", "last_seen": None,
+    }]

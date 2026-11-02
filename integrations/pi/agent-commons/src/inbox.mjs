@@ -37,9 +37,8 @@ export function hasQueuedOutboundMessage(state, message) {
   ) ?? false;
 }
 
-export function nextOutboundForSession(state, sessionId) {
-  if (!sessionId) return null;
-  return state.outbox.find((message) => message.target_session_id === sessionId) ?? null;
+export function nextOutbound(state) {
+  return state.outbox[0] ?? null;
 }
 
 export function classifyOutboundFailure(error) {
@@ -60,7 +59,7 @@ export function acknowledgeOutboundMessage(state, clientMessageId) {
   return message.complete ? closeRelayThread(next, message.thread_id) : next;
 }
 
-export function queueRelayPage(state, page, agentId, targetSessionId, maxPending = 100) {
+export function queueRelayPage(state, page, agentId, maxPending = 100) {
   const pendingInbox = [...state.pendingInbox];
   const pendingIds = new Set(pendingInbox.map((message) => message.client_msg_id));
   const seen = new Set(state.seen);
@@ -71,9 +70,6 @@ export function queueRelayPage(state, page, agentId, targetSessionId, maxPending
     if (message.seq <= cursor) continue;
     if (message.recipient === agentId && message.sender !== agentId
         && !seen.has(message.client_msg_id) && !pendingIds.has(message.client_msg_id)) {
-      if (typeof targetSessionId !== "string" || !targetSessionId) {
-        throw new Error("Pi did not provide the target session identity; refusing to advance the relay cursor");
-      }
       if (closedThreads.has(message.thread_id)) {
         seen.add(message.client_msg_id);
         cursor = message.seq;
@@ -83,7 +79,7 @@ export function queueRelayPage(state, page, agentId, targetSessionId, maxPending
         full = true;
         break;
       }
-      pendingInbox.push({ ...message, target_session_id: targetSessionId });
+      pendingInbox.push(message);
       pendingIds.add(message.client_msg_id);
       if (message.complete) {
         if (closedThreads.size >= MAX_CLOSED_THREADS) throw new Error("closed-thread state limit reached; refusing to advance the relay cursor");
@@ -102,9 +98,9 @@ export function queueRelayPage(state, page, agentId, targetSessionId, maxPending
   };
 }
 
-export function acknowledgeRelayMessage(state, clientMessageId, sessionId) {
+export function acknowledgeRelayMessage(state, clientMessageId) {
   const message = state.pendingInbox.find((item) => item.client_msg_id === clientMessageId);
-  if (!message || (message.target_session_id && message.target_session_id !== sessionId)) return state;
+  if (!message) return state;
   return {
     ...state,
     pendingInbox: state.pendingInbox.filter((item) => item.client_msg_id !== clientMessageId),
@@ -128,15 +124,11 @@ export function hasVisiblePeerNotice(entries, clientMessageId) {
   );
 }
 
-export function nextRelayMessage(state, sessionId, queuedIds = new Set()) {
-  const pending = state.pendingInbox.filter((message) =>
-    message.target_session_id === sessionId && !queuedIds.has(message.client_msg_id),
-  );
+export function nextRelayMessage(state, queuedIds = new Set()) {
+  const pending = state.pendingInbox.filter((message) => !queuedIds.has(message.client_msg_id));
   return pending.find((message) => message.delivery === "interrupt") ?? pending[0] ?? null;
 }
 
-export function visiblePendingMessages(state, sessionId, isVisible) {
-  return state.pendingInbox.filter((message) =>
-    message.target_session_id === sessionId && isVisible(message.client_msg_id),
-  );
+export function visiblePendingMessages(state, isVisible) {
+  return state.pendingInbox.filter((message) => isVisible(message.client_msg_id));
 }

@@ -1,6 +1,23 @@
 import json
+from datetime import UTC, datetime
 
 import roomctl
+
+
+def test_configure_utf8_output_reconfigures_standard_streams(monkeypatch):
+    class Stream:
+        def __init__(self):
+            self.options = None
+
+        def reconfigure(self, **options):
+            self.options = options
+
+    stdout, stderr = Stream(), Stream()
+    monkeypatch.setattr(roomctl.sys, "stdout", stdout)
+    monkeypatch.setattr(roomctl.sys, "stderr", stderr)
+    roomctl.configure_utf8_output()
+    assert stdout.options == {"encoding": "utf-8", "errors": "strict"}
+    assert stderr.options == {"encoding": "utf-8", "errors": "strict"}
 
 
 def _config(tmp_path, monkeypatch, value=None):
@@ -10,6 +27,91 @@ def _config(tmp_path, monkeypatch, value=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value))
     return path
+
+
+def test_doctor_reports_fresh_listener_and_does_not_change_config(tmp_path, monkeypatch, capsys):
+    config = {
+        "api": "https://relay.tailnet", "project": "crew", "agent_id": "pi", "cursor": 27,
+    }
+    path = _config(tmp_path, monkeypatch, config)
+    before = path.read_bytes()
+    monkeypatch.setattr(roomctl.time, "time", lambda: 1000)
+    last_seen = datetime.fromtimestamp(880.001, UTC).isoformat().replace("+00:00", "Z")
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def participants(self):
+            return {"participants": [{"agent_id": "pi", "last_seen": last_seen}]}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["doctor"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is True
+    assert [check["name"] for check in report["checks"]] == ["relay", "participant", "listener"]
+    assert report["checks"][-1] == {"name": "listener", "ok": True, "detail": "last polled 120s ago"}
+    assert path.read_bytes() == before
+
+
+def test_doctor_fails_for_stale_listener_or_missing_project_member(tmp_path, monkeypatch, capsys):
+    path = _config(
+        tmp_path, monkeypatch,
+        {"api": "https://relay.tailnet", "project": "crew", "agent_id": "pi"},
+    )
+    monkeypatch.setattr(roomctl.time, "time", lambda: 1000)
+    last_seen = datetime.fromtimestamp(880, UTC).isoformat().replace("+00:00", "Z")
+    members = [{"agent_id": "pi", "last_seen": last_seen}]
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def participants(self):
+            return {"participants": members}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["doctor"]) == 1
+    stale = json.loads(capsys.readouterr().out)
+    assert stale["ok"] is False
+    assert stale["checks"][-1]["detail"] == "stale; last polled 120s ago"
+
+    members.clear()
+    assert roomctl.main(["doctor"]) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["checks"][-1] == {
+        "name": "participant", "ok": False, "detail": "agent has not joined this project",
+    }
+    assert path.exists()
+
+
+def test_doctor_reports_relay_failure_without_exposing_error_details(tmp_path, monkeypatch, capsys):
+    _config(
+        tmp_path, monkeypatch,
+        {"api": "https://relay.tailnet", "project": "crew", "agent_id": "pi"},
+    )
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            raise roomctl.RelayError("private response body", status=502)
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["doctor"]) == 1
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["checks"] == [{
+        "name": "relay", "ok": False, "detail": "health check failed (HTTP 502)",
+    }]
+    assert "private response body" not in output
 
 
 def test_setup_generates_name_and_rerun_reuses_saved_name(tmp_path, monkeypatch, capsys):
@@ -226,8 +328,8 @@ def test_wait_filters_messages_and_saves_cursor_after_output(tmp_path, monkeypat
         def __init__(self, *_args):
             pass
 
-        def read(self, after):
-            assert after == 0
+        def read(self, after, *, listener=None):
+            assert after == 0 and listener == "pi"
             return {
                 "messages": [
                     message("pi", "pi", 1),
@@ -272,7 +374,8 @@ def test_wait_does_not_restore_stale_config_after_reconfiguration(
         def __init__(self, *_args):
             pass
 
-        def read(self, _after):
+        def read(self, _after, *, listener=None):
+            assert listener == "pi"
             roomctl.write_config(
                 {"api": "https://relay.tailnet", "project": "new", "agent_id": "pi"}
             )
@@ -304,7 +407,8 @@ def test_wait_timeout_emits_empty_batch(tmp_path, monkeypatch, capsys):
         def __init__(self, *_args):
             pass
 
-        def read(self, _after):
+        def read(self, _after, *, listener=None):
+            assert listener == "pi"
             return {"messages": [], "next_after": 0}
 
     monkeypatch.setattr(roomctl, "RelayClient", Client)
@@ -338,7 +442,8 @@ def test_wait_retries_twelve_relay_errors_then_receives_message(tmp_path, monkey
         agent_id = "pi"
         def __init__(self, *_args):
             pass
-        def read(self, _after):
+        def read(self, _after, *, listener=None):
+            assert listener == "pi"
             calls.append(1)
             if len(calls) <= 12:
                 raise roomctl.RelayError("relay unavailable")
@@ -361,9 +466,11 @@ def test_wait_stops_on_non_retryable_4xx_with_rejoin_hint(tmp_path, monkeypatch,
     )
 
     class Client:
+        agent_id = "pi"
         def __init__(self, *_args):
             pass
-        def read(self, _after):
+        def read(self, _after, *, listener=None):
+            assert listener == "pi"
             raise roomctl.RelayError("relay returned HTTP 404", status=404)
 
     monkeypatch.setattr(roomctl, "RelayClient", Client)

@@ -14,6 +14,18 @@ test("read-only tools do not ask for destructive-action approval", async () => {
   assert.equal(asked, false);
 });
 
+test("built-in read-only tools run during a peer thread even without annotations", async () => {
+  let prompted = false;
+  const ctx = { hasUI: true, ui: { confirm: async () => { prompted = true; return true; } } };
+  for (const toolName of ["read", "grep", "find", "ls"]) {
+    assert.equal(await gatePeerToolCall(
+      { toolName, input: {} }, { name: toolName }, ctx,
+      { sender: "hermes", thread_id: "550e8400-e29b-41d4-a716-446655440001", seq: 1, hop: 0, complete: false },
+    ), undefined);
+  }
+  assert.equal(prompted, false);
+});
+
 test("peer side effects and every outbound relay message require human review", () => {
   assert.equal(shouldGateToolCall("bash", true), true);
   assert.equal(shouldGateToolCall("agent_commons_send", false), true);

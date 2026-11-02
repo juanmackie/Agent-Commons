@@ -24,9 +24,10 @@ from pydantic import (
 from app.client import LOOPBACK_HOSTS
 from app.store import (
     Conflict,
+    NotParticipant,
     ProjectCapacity,
-    ProjectStore,
     ProjectsExist,
+    ProjectStore,
 )
 
 MAX_TEXT_BYTES = 16 * 1024
@@ -186,9 +187,15 @@ def create_app(
 
     @app.get("/assets/{name}", include_in_schema=False)
     def room_asset(name: str):
-        if name not in {"room.js", "room-scroll.mjs", "room.css"}:
-            raise HTTPException(status_code=404)
-        return FileResponse(Path(__file__).with_name("static") / name)
+        base = Path(__file__).with_name("static")
+        asset_path = base / "assets" / name
+        if asset_path.exists() and asset_path.is_file():
+            return FileResponse(asset_path)
+        legacy_path = base / name
+        allowed_legacy = {"room.js", "room-scroll.mjs", "room.css"}
+        if name in allowed_legacy and legacy_path.exists() and legacy_path.is_file():
+            return FileResponse(legacy_path)
+        raise HTTPException(status_code=404)
     app.add_middleware(BodyLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
     app.state.store = store
     store_lock = threading.Lock()
@@ -336,7 +343,10 @@ def create_app(
                 status_code=409, detail="client_msg_id payload conflict"
             ) from None
         return JSONResponse(
-            result | {"recipient_joined": store.recipient_joined(project, result["recipient"])},
+            result | {
+                "recipient_joined": store.recipient_joined(project, result["recipient"]),
+                "recipient_last_seen": store.participant_last_seen(project, result["recipient"]),
+            },
 
             status_code=201 if created else 200,
             headers={"Cache-Control": "no-store"},
@@ -348,11 +358,16 @@ def create_app(
         after: int = Query(default=0, ge=0),
         limit: int = Query(default=100, ge=1, le=100),
         before: int | None = Query(default=None, ge=1),
+        listener: str | None = Query(default=None, min_length=1, max_length=64),
     ):
         if before is not None and after != 0:
             raise HTTPException(status_code=422, detail="before and after cannot be used together")
         try:
-            messages, next_after = get_store().read(project, after=after, limit=limit, before=before)
+            messages, next_after = get_store().read(
+                project, after=after, limit=limit, before=before, listener=listener
+            )
+        except NotParticipant:
+            raise HTTPException(status_code=403, detail="listener is not a project participant") from None
         except KeyError:
             raise HTTPException(status_code=404, detail="project not found") from None
         except ValueError as error:

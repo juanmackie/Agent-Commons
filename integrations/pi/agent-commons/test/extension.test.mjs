@@ -58,6 +58,7 @@ test("registered send handler shares its in-flight result with the background po
     sendUserMessage() {},
   };
   const ctx = {
+    hasUI: true,
     sessionManager: {
       getSessionId: () => "session-1",
       getBranch: () => [],
@@ -137,6 +138,7 @@ test("registered send handler does not report a conflicting queued retry as succ
     sendUserMessage() {},
   };
   const ctx = {
+    hasUI: true,
     sessionManager: {
       getSessionId: () => "session-1",
       getBranch: () => [],

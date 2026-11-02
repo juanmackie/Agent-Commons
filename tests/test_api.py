@@ -1,3 +1,4 @@
+import re
 import uuid
 
 from fastapi.testclient import TestClient
@@ -52,13 +53,14 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
         received = client.get("/v1/messages?project=demo&after=0&limit=1")
         posted_message = sent.json()
         posted_message.pop("recipient_joined")
+        posted_message.pop("recipient_last_seen")
         assert received.json() == {
             "messages": [posted_message],
             "next_after": posted_message["seq"],
         }
         older = client.get(f"/v1/messages?project=demo&before={sent.json()['seq']}")
         assert older.json()["messages"] == []
-        assert client.get(f"/v1/messages?project=demo&after=1&before=2").status_code == 422
+        assert client.get("/v1/messages?project=demo&after=1&before=2").status_code == 422
         reply = envelope(
             sender="hermes",
             recipient="pi",
@@ -98,8 +100,20 @@ def test_room_console_and_allowlisted_assets_are_served(tmp_path):
     with TestClient(create_app(tmp_path / "db.sqlite3")) as client:
         page = client.get("/")
         assert page.status_code == 200
-        assert 'id="feed"' in page.text
-        assert 'src="/assets/room.js"' in page.text
+        if 'id="root"' in page.text:
+            scripts = re.findall(
+                r'<script\b[^>]*\bsrc="(/assets/[^" ]+\.js)"', page.text
+            )
+            stylesheets = re.findall(
+                r'<link\b[^>]*\bhref="(/assets/[^" ]+\.css)"', page.text
+            )
+            assert len(scripts) == 1
+            assert len(stylesheets) == 1
+            assert client.get(scripts[0]).status_code == 200
+            assert client.get(stylesheets[0]).status_code == 200
+        else:
+            assert 'id="feed"' in page.text
+            assert 'src="/assets/room.js"' in page.text
         assert client.get("/assets/room.js").status_code == 200
         assert client.get("/assets/room-scroll.mjs").status_code == 200
         assert client.get("/assets/room.css").status_code == 200
@@ -153,6 +167,43 @@ def test_message_post_reports_current_recipient_membership_and_rolls_capacity(tm
         messages = client.get("/v1/messages?project=demo&after=0").json()["messages"]
         assert len(messages) == 1 and messages[0]["seq"] == next_message.json()["seq"]
         assert next_message.status_code != 507
+
+
+def test_listener_poll_reports_last_seen_and_send_receipt_warns_after_two_minutes(tmp_path):
+    from app.store import ProjectStore
+
+    now = [100]
+    store = ProjectStore(tmp_path / "db.sqlite3", clock=lambda: now[0])
+    with TestClient(create_app(store=store)) as client:
+        client.post("/v1/projects", json={"project": "demo", "agent": "pi"})
+        client.post("/v1/join", json={"project": "demo", "agent": "hermes"})
+        participants = client.get("/v1/participants?project=demo").json()["participants"]
+        assert {p["agent_id"]: p["last_seen"] for p in participants} == {
+            "hermes": None, "pi": None,
+        }
+        manual = client.get("/v1/messages?project=demo&after=0")
+        assert manual.status_code == 200
+        assert store.participants("demo")[0]["last_seen"] is None
+
+        heard = client.get("/v1/messages?project=demo&after=0&listener=hermes")
+        assert heard.status_code == 200
+        assert {p["agent_id"]: p["last_seen"] for p in client.get(
+            "/v1/participants?project=demo"
+        ).json()["participants"]}["hermes"] == "1970-01-01T00:01:40Z"
+        sent = client.post("/v1/messages?project=demo", json=envelope(recipient="hermes"))
+        assert sent.status_code == 201
+        assert sent.json()["recipient_last_seen"] == "1970-01-01T00:01:40Z"
+
+        now[0] = 221
+        stale = client.post("/v1/messages?project=demo", json=envelope(
+            recipient="hermes", client_msg_id=str(uuid.uuid4())
+        ))
+        assert stale.status_code == 201
+        assert stale.json()["recipient_last_seen"] == "1970-01-01T00:01:40Z"
+
+        unjoined = client.get("/v1/messages?project=demo&listener=unknown")
+        assert unjoined.status_code == 403
+        assert client.get("/v1/messages?project=demo&listener=bad%20label").status_code == 422
 
 
 def test_api_validation_bounded_text_and_conflicting_retry(tmp_path):

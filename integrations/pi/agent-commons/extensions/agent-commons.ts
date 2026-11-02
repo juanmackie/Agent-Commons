@@ -2,25 +2,18 @@ import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import { RelayClient } from "../src/relay.mjs";
+import { configuredRelayClient, recipientPollWarning } from "../src/relay.mjs";
 import { IdleWakeReservation } from "../src/idle-wake.mjs";
 import { loadState, saveState } from "../src/state.mjs";
-import { acquireOwnerLock } from "../src/owner-lock.mjs";
+import { acquireOwnerLock, OwnerLockHeldError, OwnerLockRecoveryInProgressError } from "../src/owner-lock.mjs";
 import { gatePeerToolCall, isRoomctlSend, requiresHumanPermission, shouldGateToolCall } from "../src/permission.mjs";
 import { latestPeerContext, parsePeerMarker } from "../src/peer-context.mjs";
-import { acknowledgeOutboundMessage, acknowledgeRelayMessage, classifyOutboundFailure, closedThreadsForOutbound, hasQueuedOutboundMessage, hasVisiblePeerNotice, nextOutboundForSession, nextRelayMessage, queueOutboundMessage, queueRelayPage, rejectOutboundMessage, visiblePendingMessages } from "../src/inbox.mjs";
+import { acknowledgeOutboundMessage, acknowledgeRelayMessage, classifyOutboundFailure, closedThreadsForOutbound, hasQueuedOutboundMessage, hasVisiblePeerNotice, nextOutbound, nextRelayMessage, queueOutboundMessage, queueRelayPage, rejectOutboundMessage, visiblePendingMessages } from "../src/inbox.mjs";
 
 const POLL_MS = 3000;
 const MAX_POLL_MS = 60_000;
+const OWNER_RETRY_MS = 30_000;
 const PEER_MARKER = "[Agent Commons peer delivery ";
-
-function configuredClient() {
-  const api = process.env.ROOM_API;
-  const project = process.env.ROOM_PROJECT;
-  const agentId = process.env.AGENT_ID;
-  if (!api || !project || !agentId) return null;
-  return new RelayClient({ api, project, agentId });
-}
 
 function stateFingerprint(client) {
   return createHash("sha256").update(`${client.baseUrl}\0${client.project}\0${client.agentId}`).digest("hex");
@@ -50,6 +43,11 @@ function userMessageText(message) {
   return message.content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
 }
 
+function activePeerFromTranscript(entries, closedThreads = []) {
+  const peer = latestPeerContext(entries);
+  return peer && !peer.complete && !closedThreads.includes(peer.thread_id) ? peer : null;
+}
+
 function latestPeerForMessageId(entries, clientMessageId) {
   if (!Array.isArray(entries)) return null;
   for (let index = entries.length - 1; index >= 0; index--) {
@@ -68,9 +66,17 @@ function contentFromState(message) {
   return deliveredMessage(message);
 }
 
+function sendWarnings(receipt, recipient) {
+  const membership = receipt.recipient_joined === false
+    ? ` Warning: ${recipient} has not joined this project, so no session can receive the message yet.`
+    : "";
+  return membership + recipientPollWarning(receipt, recipient);
+}
+
 export default function agentCommons(pi) {
   const queuedMessageIds = new Set();
   const outboundSends = new Map();
+  const activePolls = new Set();
   let activePeer = null;
   let currentCtx = null;
   let currentSessionId = null;
@@ -81,18 +87,34 @@ export default function agentCommons(pi) {
   let client;
   let stateFile;
   let state;
+  let listenerRole = "stopped";
+  let peerContextUnreadable = false;
   let relayDisabled = null;
   let stateWrite = Promise.resolve();
   let sessionGeneration = 0;
   let releaseOwnerLock = null;
+  let ownerRetryTimer = null;
+  let ownershipAttempt = null;
   const idleWake = new IdleWakeReservation();
 
-  function updateState(transform) {
+  function setStatus(message) {
+    currentCtx?.ui?.setStatus("agent-commons", message);
+  }
+
+  function ownsListener(generation) {
+    return generation === sessionGeneration && !stopped
+      && listenerRole === "listener" && Boolean(releaseOwnerLock);
+  }
+
+  function updateState(transform, generation = sessionGeneration) {
     const write = stateWrite.catch(() => {}).then(async () => {
-      const next = transform(state);
+      if (!ownsListener(generation) || !state) return { committed: false, state };
+      const current = state;
+      const next = transform(current);
+      if (JSON.stringify(next) === JSON.stringify(current)) return { committed: true, state: current };
       await saveState(stateFile, next);
-      state = next;
-      return next;
+      if (ownsListener(generation)) state = next;
+      return { committed: true, state: next };
     });
     stateWrite = write;
     return write;
@@ -114,12 +136,28 @@ export default function agentCommons(pi) {
     async execute(_id, params) {
       let outgoing = null;
       try {
-        if (!client) client = configuredClient();
-        if (!client) throw new Error("Set ROOM_API, ROOM_PROJECT, and AGENT_ID in the environment used to start this Pi session.");
-        if (!state || !currentCtx || !currentSessionId || currentSessionId !== state.sessionId
-            || getSessionId(currentCtx) !== currentSessionId) {
-          throw new Error("This Pi session does not own the Agent Commons inbox; refusing an untracked send.");
+        if (!client) client = await configuredRelayClient();
+        if (!client) throw new Error("Agent Commons is not configured; run roomctl setup and join.");
+        if (listenerRole === "passive") {
+          const receipt = await client.send({
+            recipient: params.recipient,
+            threadId: params.thread_id,
+            clientMessageId: params.client_msg_id ?? randomUUID(),
+            text: params.text,
+            replyTo: params.reply_to ?? null,
+            hop: params.hop ?? 0,
+            complete: params.complete ?? false,
+          });
+          const warnings = sendWarnings(receipt, params.recipient);
+          return {
+            content: [{ type: "text", text: `Sent to ${params.recipient} in thread ${params.thread_id} (relay sequence ${receipt.seq}). Replies land in the listening window.${warnings}` }],
+            details: { recipient: params.recipient, thread_id: params.thread_id, seq: receipt.seq, passive: true },
+          };
         }
+        if (listenerRole !== "listener" || !state || !releaseOwnerLock) {
+          throw new Error(relayDisabled || "This Pi window is not the active Agent Commons listener.");
+        }
+        const generation = sessionGeneration;
         outgoing = {
           recipient: params.recipient,
           thread_id: params.thread_id,
@@ -127,24 +165,42 @@ export default function agentCommons(pi) {
           hop: params.hop ?? 0,
           text: params.text,
           complete: params.complete ?? false,
-          client_msg_id: params.client_msg_id,
-          target_session_id: currentSessionId,
+          client_msg_id: params.client_msg_id ?? randomUUID(),
         };
-        await updateState((current) => queueOutboundMessage(current, outgoing));
-        const result = await sendPersistedMessage(outgoing);
-        if (result.kind === "sent") {
-          const recipientWarning = result.receipt.recipient_joined === false
-            ? ` Warning: ${outgoing.recipient} has not joined this project, so no session can receive the message yet.`
-            : "";
+        const queued = await updateState((current) => queueOutboundMessage(current, outgoing), generation);
+        if (!queued.committed) {
           return {
-            content: [{ type: "text", text: `Sent to ${outgoing.recipient} in thread ${outgoing.thread_id} (relay sequence ${result.receipt.seq}).${recipientWarning}` }],
+            content: [{ type: "text", text: "Not sent: this Pi window stopped owning the Agent Commons listener before the message was queued." }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        if (generation !== sessionGeneration || listenerRole !== "listener" || !releaseOwnerLock) {
+          if (hasQueuedOutboundMessage(queued.state, outgoing)) {
+            return {
+              content: [{ type: "text", text: `Queued for ${outgoing.recipient}; the message remains in the durable outbox. It will retry automatically; do not resend.` }],
+              details: { recipient: outgoing.recipient, queued: true },
+              isError: false,
+            };
+          }
+          return {
+            content: [{ type: "text", text: "Not sent: this Pi window stopped owning the Agent Commons listener before the message was queued." }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        const result = await sendPersistedMessage(outgoing, generation);
+        if (result.kind === "sent") {
+          const warnings = sendWarnings(result.receipt, outgoing.recipient);
+          return {
+            content: [{ type: "text", text: `Sent to ${outgoing.recipient} in thread ${outgoing.thread_id} (relay sequence ${result.receipt.seq}).${warnings}` }],
             details: { recipient: outgoing.recipient, thread_id: outgoing.thread_id, seq: result.receipt.seq, recipient_joined: result.receipt.recipient_joined },
           };
         }
         if (result.kind === "reject") {
           return { content: [{ type: "text", text: `Not sent to ${outgoing.recipient}: relay rejected the message (HTTP ${result.error.status}): ${result.error.message}.` }], details: undefined, isError: true };
         }
-        const hint = result.kind === "hold" ? " The project may be expired or missing; rejoin it to resume delivery." : " It will retry automatically; do not resend.";
+        const hint = result.kind === "hold" ? " The project may be expired or missing; rejoin the project to resume delivery." : " It will retry automatically; do not resend.";
         return { content: [{ type: "text", text: `Queued for ${outgoing.recipient}; the message remains in the durable outbox.${hint} Last error: ${result.error.message}` }], details: { recipient: outgoing.recipient, queued: true }, isError: false };
       } catch (error) {
         const stillQueued = outgoing && hasQueuedOutboundMessage(state, outgoing);
@@ -156,88 +212,86 @@ export default function agentCommons(pi) {
     },
   });
 
-  async function acknowledgePending(peer, sessionId) {
+  async function acknowledgePending(peer, generation = sessionGeneration) {
     if (!state || !peer?.client_msg_id) return;
     let acknowledged = false;
     await updateState((current) => {
-      const next = acknowledgeRelayMessage(current, peer.client_msg_id, sessionId);
+      const next = acknowledgeRelayMessage(current, peer.client_msg_id);
       acknowledged = next !== current;
       return next;
-    });
+    }, generation);
     if (acknowledged) queuedMessageIds.delete(peer.client_msg_id);
   }
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (event.messageType !== "user" || typeof event.prompt !== "string") return;
-    const sessionId = getSessionId(ctx);
-    const current = latestPeerContext([{ type: "message", message: { role: "user", content: event.prompt } }]);
-    if (current) {
-      activePeer = current;
-      return;
-    }
-    if (state?.sessionId && sessionId && state.sessionId !== sessionId) return;
-    if (state?.peerContext?.complete) {
-      activePeer = null;
-      return;
-    }
+    const currentPrompt = [{ type: "message", message: { role: "user", content: event.prompt } }];
+    const currentPeer = latestPeerContext(currentPrompt);
     try {
-      activePeer = latestPeerContext(ctx.sessionManager.getBranch()) || activePeer;
+      activePeer = currentPeer
+        ? activePeerFromTranscript(currentPrompt, state?.closedThreads ?? [])
+        : activePeerFromTranscript(ctx.sessionManager.getBranch(), state?.closedThreads ?? []);
+      peerContextUnreadable = false;
     } catch {
-      // Keep the last verified peer context if the session history is unavailable.
+      activePeer = null;
+      peerContextUnreadable = true;
     }
   });
 
-  async function acknowledgeVisibleCompletions() {
-    if (!state || !currentCtx || currentSessionId !== state.sessionId) return;
-    const branch = currentCtx.sessionManager.getBranch();
+  async function acknowledgeVisibleCompletions(generation = sessionGeneration) {
+    if (!state || !currentCtx) return;
+    let branch;
+    try {
+      branch = currentCtx.sessionManager.getBranch();
+    } catch {
+      peerContextUnreadable = true;
+      return;
+    }
     for (const message of [...state.pendingInbox]) {
-      if (message.complete && message.target_session_id === currentSessionId
-          && hasVisiblePeerNotice(branch, message.client_msg_id)) {
+      if (message.complete && hasVisiblePeerNotice(branch, message.client_msg_id)) {
         await acknowledgePending({
           sender: message.sender, thread_id: message.thread_id, seq: message.seq,
           client_msg_id: message.client_msg_id, hop: message.hop, complete: true,
-        }, currentSessionId);
+        }, generation);
       }
     }
   }
 
   pi.on("agent_start", async (_event, ctx) => {
-    if (!state) return;
     const sessionId = getSessionId(ctx);
-    if (!sessionId || sessionId !== state.sessionId) return;
-    idleWake.release(sessionId);
-    const branch = ctx.sessionManager.getBranch();
-    for (const pending of visiblePendingMessages(state, sessionId, (id) => Boolean(latestPeerForMessageId(branch, id)))) {
+    if (sessionId) idleWake.release(sessionId);
+    if (listenerRole !== "listener" || !releaseOwnerLock || !state) return;
+    let branch;
+    try {
+      branch = ctx.sessionManager.getBranch();
+    } catch {
+      peerContextUnreadable = true;
+      return;
+    }
+    const generation = sessionGeneration;
+    for (const pending of visiblePendingMessages(state, (id) => Boolean(latestPeerForMessageId(branch, id)))) {
       const peer = latestPeerForMessageId(branch, pending.client_msg_id);
-      if (peer) await acknowledgePending(peer, sessionId);
+      if (peer) await acknowledgePending(peer, generation);
     }
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!shouldGateToolCall(event.toolName, Boolean(activePeer), event.input)) return undefined;
+    if (!shouldGateToolCall(event.toolName, Boolean(activePeer || peerContextUnreadable), event.input)) return undefined;
     const tool = pi.getAllTools().find((candidate) => candidate.name === event.toolName);
     const needsApproval = event.toolName === "agent_commons_send" || isRoomctlSend(event.toolName, event.input)
-      || requiresHumanPermission(tool?.annotations);
+      || requiresHumanPermission(tool?.annotations, event.toolName);
     if (!needsApproval) return undefined;
-    const sessionId = getSessionId(ctx);
-    if (relayDisabled) return { block: true, reason: "Peer-requested action blocked because Agent Commons state or host identity is invalid." };
-    if (event.toolName === "agent_commons_send" && (!sessionId || sessionId !== state?.sessionId)) {
-      return { block: true, reason: "Agent Commons send blocked because this is not the session that owns the relay inbox." };
-    }
-    if (activePeer && (!sessionId || sessionId !== state?.sessionId)) {
-      return { block: true, reason: "Peer-requested action blocked because the active Pi session identity does not match the session that owns this relay inbox." };
-    }
     return gatePeerToolCall(event, tool, ctx, activePeer, state ? closedThreadsForOutbound(state) : []);
   });
 
-  async function persistPage(page) {
-    await updateState((current) => queueRelayPage(current, page, client.agentId, current.sessionId));
+  async function persistPage(page, generation) {
+    await updateState((current) => queueRelayPage(current, page, client.agentId), generation);
   }
 
-  function sendPersistedMessage(message) {
+  function sendPersistedMessage(message, generation = sessionGeneration) {
     const existing = outboundSends.get(message.client_msg_id);
     if (existing) return existing;
-    const pending = sendPersistedMessageOnce(message);
+    const pending = sendPersistedMessageOnce(message, generation);
     outboundSends.set(message.client_msg_id, pending);
     void pending.then(
       () => { if (outboundSends.get(message.client_msg_id) === pending) outboundSends.delete(message.client_msg_id); },
@@ -246,7 +300,7 @@ export default function agentCommons(pi) {
     return pending;
   }
 
-  async function sendPersistedMessageOnce(message) {
+  async function sendPersistedMessageOnce(message, generation) {
     try {
       const receipt = await client.send({
         recipient: message.recipient,
@@ -257,13 +311,13 @@ export default function agentCommons(pi) {
         hop: message.hop,
         complete: message.complete,
       });
-      await updateState((current) => acknowledgeOutboundMessage(current, message.client_msg_id));
-      if (message.complete && activePeer?.thread_id === message.thread_id) activePeer = { ...activePeer, complete: true };
+      await updateState((current) => acknowledgeOutboundMessage(current, message.client_msg_id), generation);
+      if (message.complete && activePeer?.thread_id === message.thread_id) activePeer = null;
       return { kind: "sent", receipt };
     } catch (error) {
       const kind = classifyOutboundFailure(error);
       if (kind === "reject") {
-        await updateState((current) => rejectOutboundMessage(current, message.client_msg_id));
+        await updateState((current) => rejectOutboundMessage(current, message.client_msg_id), generation);
         const notice = `Not sent to ${message.recipient}: the relay rejected this message (HTTP ${error.status}): ${error.message}.`;
         try {
           pi.sendMessage({
@@ -282,32 +336,34 @@ export default function agentCommons(pi) {
     }
   }
 
-  async function flushOutbox() {
-    const message = state ? nextOutboundForSession(state, currentSessionId) : null;
+  async function flushOutbox(generation) {
+    const message = state ? nextOutbound(state) : null;
     if (!message) return;
-    const result = await sendPersistedMessage(message);
+    const result = await sendPersistedMessage(message, generation);
     if (result.kind === "retry") throw result.error;
     return result;
   }
 
-  async function deliverPending() {
-    if (!currentCtx || !currentSessionId || currentSessionId !== state?.sessionId
+  async function deliverPending(generation) {
+    if (generation !== sessionGeneration || stopped || listenerRole !== "listener" || !currentCtx || !currentSessionId
         || getSessionId(currentCtx) !== currentSessionId) return;
     const idle = currentCtx.isIdle();
     const expiredWakeMessageId = idleWake.expire(currentSessionId);
     if (expiredWakeMessageId) queuedMessageIds.delete(expiredWakeMessageId);
     if (idleWake.shouldDefer(currentSessionId, idle)) return;
-    const message = nextRelayMessage(state, currentSessionId, queuedMessageIds);
+    const message = nextRelayMessage(state, queuedMessageIds);
     if (!message) return;
-    activePeer = {
+    activePeer = message.complete ? null : {
       sender: message.sender,
       thread_id: message.thread_id,
       seq: message.seq,
       client_msg_id: message.client_msg_id,
       hop: message.hop,
-      complete: message.complete,
+      complete: false,
     };
-    await updateState((current) => ({ ...current, peerContext: activePeer }));
+    await updateState((current) => ({ ...current, peerContext: activePeer }), generation);
+    if (!ownsListener(generation) || !currentCtx || !currentSessionId
+        || getSessionId(currentCtx) !== currentSessionId) return;
     queuedMessageIds.add(message.client_msg_id);
     try {
       const content = contentFromState(message);
@@ -341,17 +397,27 @@ export default function agentCommons(pi) {
     }
   }
 
+  function runPoll() {
+    const pending = pollOnce();
+    activePolls.add(pending);
+    void pending.then(
+      () => activePolls.delete(pending),
+      () => activePolls.delete(pending),
+    );
+    return pending;
+  }
+
   function schedulePoll(delay, generation) {
     if (stopped || generation !== sessionGeneration) return;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = setTimeout(() => {
       pollTimer = null;
-      void pollOnce();
+      void runPoll();
     }, delay);
   }
 
   async function pollOnce() {
-    if (stopped || !currentCtx || !state || !client
+    if (stopped || listenerRole !== "listener" || !currentCtx || !state || !client
         || !currentSessionId || getSessionId(currentCtx) !== currentSessionId) return;
     if (polling) {
       schedulePoll(POLL_MS, sessionGeneration);
@@ -361,15 +427,16 @@ export default function agentCommons(pi) {
     const generation = sessionGeneration;
     let outboxFailure = null;
     try {
-      await flushOutbox().catch((error) => { outboxFailure = error; });
-      const page = await client.read(state.cursor);
+      await flushOutbox(generation).catch((error) => { outboxFailure = error; });
+      const page = await client.read(state.cursor, client.agentId);
       if (generation !== sessionGeneration || stopped) return;
-      await persistPage(page);
+      await persistPage(page, generation);
       if (generation === sessionGeneration && !stopped) {
-        await acknowledgeVisibleCompletions();
-        await deliverPending();
+        await acknowledgeVisibleCompletions(generation);
+        await deliverPending(generation);
         if (outboxFailure) throw outboxFailure;
         pollFailures = 0;
+        setStatus(`Agent Commons: listening as ${client.agentId} in ${client.project}`);
       }
     } catch (error) {
       if (generation !== sessionGeneration || stopped) return;
@@ -385,7 +452,7 @@ export default function agentCommons(pi) {
       } else {
         failure = `Relay unavailable (${error.message})`;
       }
-      currentCtx?.ui.setStatus("agent-commons", `${failure}; retrying in ${Math.ceil(delay / 1000)}s`);
+      setStatus(`${failure}; retrying in ${Math.ceil(delay / 1000)}s`);
     } finally {
       polling = false;
       if (generation === sessionGeneration && !stopped) {
@@ -395,63 +462,154 @@ export default function agentCommons(pi) {
     }
   }
 
+  function runOwnershipAttempt(generation) {
+    const pending = attemptOwnership(generation);
+    ownershipAttempt = pending;
+    void pending.then(
+      () => { if (ownershipAttempt === pending) ownershipAttempt = null; },
+      () => { if (ownershipAttempt === pending) ownershipAttempt = null; },
+    );
+    return pending;
+  }
+
+  async function drainListenerWork() {
+    const attempt = ownershipAttempt;
+    if (attempt) await attempt.catch(() => {});
+    await Promise.allSettled([...activePolls]);
+    await Promise.allSettled([...outboundSends.values()]);
+    await stateWrite.catch(() => {});
+  }
+
+  function scheduleOwnerRetry(generation) {
+    if (stopped || generation !== sessionGeneration) return;
+    if (ownerRetryTimer) clearTimeout(ownerRetryTimer);
+    ownerRetryTimer = setTimeout(() => {
+      ownerRetryTimer = null;
+      void runOwnershipAttempt(generation);
+    }, OWNER_RETRY_MS);
+  }
+
+  async function attemptOwnership(generation) {
+    if (stopped || generation !== sessionGeneration || !currentCtx || !client || !currentSessionId) return;
+    try {
+      const release = await acquireOwnerLock(`${stateFile}.owner.lock`);
+      if (stopped || generation !== sessionGeneration) {
+        await release();
+        return;
+      }
+      releaseOwnerLock = release;
+      try {
+        state = await loadState(stateFile, stateFingerprint(client));
+        listenerRole = "listener";
+        relayDisabled = null;
+        let branch;
+        try {
+          branch = currentCtx.sessionManager.getBranch();
+          activePeer = activePeerFromTranscript(branch, state.closedThreads);
+          peerContextUnreadable = false;
+        } catch {
+          activePeer = null;
+          peerContextUnreadable = true;
+        }
+        for (const pending of branch ? visiblePendingMessages(
+          state,
+          (id) => Boolean(latestPeerForMessageId(branch, id)),
+        ) : []) {
+          const transcriptPeer = latestPeerForMessageId(branch, pending.client_msg_id);
+          if (transcriptPeer) await acknowledgePending(transcriptPeer, generation);
+        }
+        await acknowledgeVisibleCompletions(generation);
+        setStatus(`Agent Commons: listening as ${client.agentId} in ${client.project}`);
+        void runPoll();
+      } catch (error) {
+        releaseOwnerLock = null;
+        await release();
+        throw error;
+      }
+    } catch (error) {
+      if (stopped || generation !== sessionGeneration) return;
+      state = null;
+      if (error instanceof OwnerLockHeldError || error instanceof OwnerLockRecoveryInProgressError) {
+        listenerRole = "passive";
+        relayDisabled = null;
+        const reason = error instanceof OwnerLockHeldError
+          ? `PID ${error.pid} owns the listener`
+          : `PID ${error.pid} is checking listener ownership`;
+        setStatus(`Agent Commons: passive; ${reason}. Replies land in the listening window.`);
+        scheduleOwnerRetry(generation);
+      } else {
+        listenerRole = "disabled";
+        relayDisabled = error.message;
+        setStatus(`Agent Commons listener disabled: ${error.message}`);
+      }
+    }
+  }
+
   function stopPolling() {
     stopped = true;
+    listenerRole = "stopped";
     sessionGeneration += 1;
     idleWake.release(currentSessionId);
     currentCtx = null;
     currentSessionId = null;
     if (pollTimer) clearTimeout(pollTimer);
+    if (ownerRetryTimer) clearTimeout(ownerRetryTimer);
     pollFailures = 0;
     pollTimer = null;
+    ownerRetryTimer = null;
+    state = null;
     queuedMessageIds.clear();
   }
 
   pi.on("session_start", async (_event, ctx) => {
     stopPolling();
+    await drainListenerWork();
+    const previousRelease = releaseOwnerLock;
+    releaseOwnerLock = null;
+    await previousRelease?.();
     stopped = false;
+    listenerRole = "starting";
     relayDisabled = null;
+    activePeer = null;
+    peerContextUnreadable = false;
     currentCtx = ctx;
     currentSessionId = getSessionId(ctx);
     stateFile = process.env.AGENT_COMMONS_STATE || path.join(os.homedir(), ".agent-room-relay", "pi-state.json");
-    activePeer = null;
+
+    if (!ctx.hasUI || process.env.PI_SUBAGENT_CHILD === "1") {
+      listenerRole = "dormant";
+      if (ctx.hasUI) setStatus("Agent Commons: dormant in a subagent child.");
+      return;
+    }
+    if (!currentSessionId) {
+      listenerRole = "disabled";
+      relayDisabled = "Pi did not provide an active session ID";
+      setStatus(`Agent Commons listener disabled: ${relayDisabled}.`);
+      return;
+    }
     try {
-      await stateWrite.catch(() => {});
-      client = configuredClient();
+      try {
+        activePeer = activePeerFromTranscript(ctx.sessionManager.getBranch());
+      } catch {
+        peerContextUnreadable = true;
+      }
+      client = await configuredRelayClient();
       if (!client) {
-        ctx.ui.setStatus("agent-commons", "Agent Commons not configured");
+        listenerRole = "unconfigured";
+        setStatus("Agent Commons not configured; run roomctl setup and join.");
         return;
       }
-      if (!currentSessionId) throw new Error("Pi did not provide an active session ID; relay delivery is disabled.");
-      if (!releaseOwnerLock) {
-        releaseOwnerLock = await acquireOwnerLock(`${stateFile}.owner.lock`, currentSessionId);
-      }
-      state = await loadState(stateFile, stateFingerprint(client));
-      if (!state.sessionId) {
-        await updateState((current) => ({ ...current, sessionId: currentSessionId }));
-      }
-      if (state.sessionId === currentSessionId) {
-        const branch = ctx.sessionManager.getBranch();
-        const historyPeer = latestPeerContext(branch);
-        activePeer = state.peerContext?.complete ? state.peerContext : historyPeer || state.peerContext;
-        for (const pending of visiblePendingMessages(state, currentSessionId, (id) => Boolean(latestPeerForMessageId(branch, id)))) {
-          const transcriptPeer = latestPeerForMessageId(branch, pending.client_msg_id);
-          if (transcriptPeer) await acknowledgePending(transcriptPeer, currentSessionId);
-        }
-        await acknowledgeVisibleCompletions();
-      } else {
-        ctx.ui.setStatus("agent-commons", "Messages are queued for the original Pi session; resume that session to receive them.");
-      }
-      void pollOnce();
+      await runOwnershipAttempt(sessionGeneration);
     } catch (error) {
+      listenerRole = "disabled";
       relayDisabled = error.message;
-      activePeer = { sender: "unknown", thread_id: null, seq: 0, hop: 8, complete: true };
-      ctx.ui.setStatus("agent-commons", `Relay disabled: ${error.message}`);
+      setStatus(`Agent Commons listener disabled: ${error.message}`);
     }
   });
 
   pi.on("session_shutdown", async () => {
     stopPolling();
+    await drainListenerWork();
     const release = releaseOwnerLock;
     releaseOwnerLock = null;
     await release?.();

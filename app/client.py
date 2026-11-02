@@ -134,10 +134,12 @@ class RelayClient:
         query = urllib.parse.urlencode({"project": self._require_project()})
         return self._request("GET", "/v1/participants?" + query)
 
-    def read(self, after: int, limit: int = 100):
-        query = urllib.parse.urlencode(
-            {"project": self._require_project(), "after": after, "limit": limit}
-        )
+    def read(self, after: int, limit: int = 100, *, listener: str | None = None):
+        params = {"project": self._require_project(), "after": after, "limit": limit}
+        if listener is not None:
+            validate_agent_id(listener)
+            params["listener"] = listener
+        query = urllib.parse.urlencode(params)
         return self._request("GET", "/v1/messages?" + query)
 
     def read_before(self, before: int, limit: int = 100):

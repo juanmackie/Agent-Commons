@@ -29,6 +29,10 @@ class ProjectsExist(Exception):
         super().__init__("other projects exist")
 
 
+class NotParticipant(Exception):
+    """A requested listener is not a member of the project."""
+
+
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _AGENT = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -96,7 +100,7 @@ class ProjectStore:
             pruned_through INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS participants(
             project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-            agent_id TEXT NOT NULL, joined_at INTEGER NOT NULL,
+            agent_id TEXT NOT NULL, joined_at INTEGER NOT NULL, last_seen INTEGER,
             PRIMARY KEY(project_id, agent_id));
           CREATE INDEX IF NOT EXISTS idx_messages_project_seq ON messages(project_id, seq);
           CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_project_client_id ON messages(project_id, client_msg_id) WHERE project_id IS NOT NULL;
@@ -105,6 +109,9 @@ class ProjectStore:
             client_msg_id TEXT NOT NULL, seq INTEGER NOT NULL, payload_hash TEXT NOT NULL,
             recipient TEXT NOT NULL, PRIMARY KEY(project_id,client_msg_id), UNIQUE(project_id,seq));
         """)
+        participant_columns = {row[1] for row in self.db.execute("PRAGMA table_info(participants)")}
+        if "last_seen" not in participant_columns:
+            self.db.execute("ALTER TABLE participants ADD COLUMN last_seen INTEGER")
         project_columns = {row[1] for row in self.db.execute("PRAGMA table_info(projects)")}
         if "pruned_through" not in project_columns:
             self.db.execute(
@@ -223,7 +230,7 @@ class ProjectStore:
             if row is None:
                 raise KeyError
             self.db.execute(
-                "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
+                "INSERT OR IGNORE INTO participants(project_id,agent_id,joined_at) VALUES(?,?,?)",
                 (project_id, agent_id, now),
             )
             self.db.execute(
@@ -265,7 +272,7 @@ class ProjectStore:
                     (project_id, room_hash, now, now),
                 )
             self.db.execute(
-                "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
+                "INSERT OR IGNORE INTO participants(project_id,agent_id,joined_at) VALUES(?,?,?)",
                 (project_id, agent_id, now),
             )
         return row is None
@@ -299,16 +306,27 @@ class ProjectStore:
         with self._lock:
             self._project(project_id, now)
             rows = self.db.execute(
-                "SELECT agent_id,joined_at FROM participants WHERE project_id=? ORDER BY agent_id",
+                "SELECT agent_id,joined_at,last_seen FROM participants WHERE project_id=? ORDER BY agent_id",
                 (project_id,),
             ).fetchall()
         return [
             {
                 "agent_id": row["agent_id"],
                 "joined_at": self._timestamp(row["joined_at"]),
+                "last_seen": self._timestamp(row["last_seen"]) if row["last_seen"] is not None else None,
             }
             for row in rows
         ]
+
+    def participant_last_seen(self, project_id: str, agent_id: str) -> str | None:
+        now = self.clock()
+        with self._lock:
+            self._project(project_id, now)
+            row = self.db.execute(
+                "SELECT last_seen FROM participants WHERE project_id=? AND agent_id=?",
+                (project_id, agent_id),
+            ).fetchone()
+        return self._timestamp(row["last_seen"]) if row and row["last_seen"] is not None else None
 
     @staticmethod
     def _payload_hash(payload):
@@ -385,7 +403,7 @@ class ProjectStore:
                     through,
                 )
             self.db.execute(
-                "INSERT OR IGNORE INTO participants VALUES(?,?,?)",
+                "INSERT OR IGNORE INTO participants(project_id,agent_id,joined_at) VALUES(?,?,?)",
                 (project_id, payload["sender"], now),
             )
             cursor = self.db.execute(
@@ -424,21 +442,52 @@ class ProjectStore:
             return self._message(row), True
 
     def read(
-        self, project_id: str, *, after: int, limit: int, before: int | None = None
+        self, project_id: str, *, after: int, limit: int, before: int | None = None,
+        listener: str | None = None,
     ) -> tuple[list[dict], int]:
         now = self.clock()
-        with self._lock:
-            self._project(project_id, now)
-            if before is None:
-                rows = self.db.execute(
-                    "SELECT * FROM messages WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?",
-                    (project_id, after, limit),
-                ).fetchall()
-            else:
-                rows = self.db.execute(
-                    "SELECT * FROM (SELECT * FROM messages WHERE project_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
-                    (project_id, before, limit),
-                ).fetchall()
+        if listener is not None:
+            self._validate_membership(project_id, listener)
+            with self._transaction():
+                self._project(project_id, now)
+                participant = self.db.execute(
+                    "SELECT last_seen FROM participants WHERE project_id=? AND agent_id=?",
+                    (project_id, listener),
+                ).fetchone()
+                if participant is None:
+                    raise NotParticipant("listener must be a project participant")
+                if participant["last_seen"] is None or participant["last_seen"] <= now - 30:
+                    self.db.execute(
+                        "UPDATE participants SET last_seen=? WHERE project_id=? AND agent_id=?",
+                        (now, project_id, listener),
+                    )
+                self.db.execute(
+                    "UPDATE projects SET last_activity=MAX(last_activity,?) WHERE project_id=?",
+                    (now, project_id),
+                )
+                if before is None:
+                    rows = self.db.execute(
+                        "SELECT * FROM messages WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?",
+                        (project_id, after, limit),
+                    ).fetchall()
+                else:
+                    rows = self.db.execute(
+                        "SELECT * FROM (SELECT * FROM messages WHERE project_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                        (project_id, before, limit),
+                    ).fetchall()
+        else:
+            with self._lock:
+                self._project(project_id, now)
+                if before is None:
+                    rows = self.db.execute(
+                        "SELECT * FROM messages WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?",
+                        (project_id, after, limit),
+                    ).fetchall()
+                else:
+                    rows = self.db.execute(
+                        "SELECT * FROM (SELECT * FROM messages WHERE project_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                        (project_id, before, limit),
+                    ).fetchall()
         messages = [self._message(row) for row in rows]
         return messages, messages[-1]["seq"] if messages else after
 

@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const MAX_TEXT_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -13,6 +16,51 @@ export class RelayError extends Error {
     this.retryable = retryable;
     this.configuration = configuration;
   }
+}
+
+export function configPath(env = process.env) {
+  return path.join(env.LOCALAPPDATA || os.homedir(), "agent-commons", "config.json");
+}
+
+export async function configuredRelayClient(env = process.env) {
+  let saved = {};
+  const hasCompleteEnvironment = ["ROOM_API", "ROOM_PROJECT", "AGENT_ID"]
+    .every((key) => typeof env[key] === "string");
+  if (!hasCompleteEnvironment) {
+    try {
+      const parsed = JSON.parse(await readFile(configPath(env), "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("invalid object");
+      }
+      saved = parsed;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new RelayError("Agent Commons config.json is unreadable", { configuration: true });
+      }
+    }
+  }
+  const api = env.ROOM_API ?? saved.api;
+  const project = env.ROOM_PROJECT ?? saved.project;
+  const agentId = env.AGENT_ID ?? saved.agent_id;
+  if (api == null && project == null && agentId == null) return null;
+  if (typeof api !== "string" || typeof project !== "string" || typeof agentId !== "string") {
+    throw new RelayError("Agent Commons config requires api, project, and agent_id", { configuration: true });
+  }
+  try {
+    return new RelayClient({ api, project, agentId });
+  } catch (error) {
+    throw new RelayError(`Agent Commons config is invalid (${error.message})`, { configuration: true });
+  }
+}
+
+export function recipientPollWarning(receipt, recipient, now = Date.now()) {
+  if (!Object.hasOwn(receipt, "recipient_last_seen")) return "";
+  if (receipt.recipient_last_seen === null) {
+    return ` Warning: ${recipient} has never polled this relay; replies may not be seen.`;
+  }
+  const lastSeen = Date.parse(receipt.recipient_last_seen);
+  if (!Number.isFinite(lastSeen) || now - lastSeen < 120_000) return "";
+  return ` Warning: ${recipient} has not polled for at least 2 minutes; replies may not be seen.`;
 }
 
 export class RelayClient {
@@ -75,9 +123,12 @@ export class RelayClient {
   }
 
 
-  async read(after) {
+  async read(after, listener = null) {
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("relay cursor must be a non-negative safe integer");
-    const query = new URLSearchParams({ project: this.project, after: String(after), limit: "100" });
+    if (listener !== null && (typeof listener !== "string" || !LABEL.test(listener))) throw new TypeError("invalid listener name");
+    const params = { project: this.project, after: String(after), limit: "100" };
+    if (listener !== null) params.listener = listener;
+    const query = new URLSearchParams(params);
     const result = await this.#request(`/v1/messages?${query}`);
     if (!result || !Array.isArray(result.messages) || result.messages.length > 100
       || !Number.isSafeInteger(result.next_after) || result.next_after < after) throw new RelayError("relay returned an invalid message page");

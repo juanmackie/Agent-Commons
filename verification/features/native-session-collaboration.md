@@ -2,13 +2,13 @@
 
 ## User-visible behavior
 
-The Pi extension and Hermes plugin deliver relay messages to the configured, existing user-facing session. They do not create bridge-owned sessions. A received peer message keeps its sender, thread, sequence, hop count, and completion marker. Peer-requested side effects and every outbound room message require the host's human-approval flow.
+The Pi extension and Hermes plugin are intended to deliver relay messages to the configured, existing user-facing session. They do not create bridge-owned sessions. A received peer message keeps its sender, thread, sequence, hop count, and completion marker. Peer-requested side effects and every outbound room message require the host's human-approval flow. This describes the implementation contract; it is not evidence that a live session received a message.
 
 ## Local proof
 
 Run `bash verification/run.sh` from the repository root. It runs Pi helper tests, Hermes plugin tests, the project suite, and package/deployment-template checks. The Hermes approval-seam test runs when the installed Hermes package is available; otherwise pytest skips it. For the installed Hermes host, run the plugin tests with that host's Python interpreter.
 
-The installed Pi 1.4.0 loader also loads the current extension and registers its send tool and event handlers without starting a session. The installed Hermes 0.18.2 interpreter exercises the host approval resolver. These checks use test doubles for relay/gateway boundaries; they prove host loading and local approval logic, not delivery through a live session.
+Historical local checks on 2026-10-31 used the installed Pi 1.4.0 loader to load the extension and register its send tool and event handlers, and the installed Hermes 0.18.2 interpreter to exercise the host approval resolver. These checks used test doubles for relay/gateway boundaries. They proved host loading and local approval logic only, not message delivery through a live session; those versions are not asserted to be current.
 
 ## Live acceptance procedure
 
@@ -24,4 +24,4 @@ Only perform this after the operator authorizes the exact test messages and targ
 
 ## Current status
 
-Live acceptance is not complete. Read-only checks on 2026-10-31 found no Hermes gateway process and no Python process command line matching the installed Hermes agent path. The last provider check found no usable Hermes model-provider login. A subsequent process check found one Pi-Bolt process, but its command line exposed no session ID or integration path, so it was not matched to the required session or contacted. The operator chose to defer live testing. No active-session exchange, destructive-request denial, or unavailable-session recovery has been observed. Keep deployment and live network changes gated. Follow [native integration limits](../../docs/native-session-integrations.md) and [operations gates](../../docs/operations.md).
+Live acceptance is not complete. Read-only checks on 2026-10-31 found no Hermes gateway process and no Python process command line matching the installed Hermes agent path. The last provider check found no usable Hermes model-provider login. A subsequent process check found one Pi-Bolt process, but its command line exposed no session ID or integration path, so it was not matched to the required session or contacted. The operator chose to defer live testing. No unsolicited message was observed arriving in a live Pi or Hermes session, and no active-session exchange, destructive-request denial, or unavailable-session recovery was verified. These are historical checks, not current host facts. Keep deployment and live network changes gated. Follow [native integration limits](../../docs/native-session-integrations.md) and [operations gates](../../docs/operations.md).
