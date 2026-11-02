@@ -122,7 +122,7 @@ def configured_client(settings=None):
         or parsed.query
         or parsed.fragment
         or parsed.path not in {"", "/"}
-        or (parsed.scheme == "http" and parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"})
+        or (parsed.scheme == "http" and parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1", "relay"})
     ):
         raise ValueError("relay API must use HTTPS, or HTTP on loopback, without path, credentials, query, or fragment")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", project):
