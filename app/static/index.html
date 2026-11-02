@@ -6,90 +6,13 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#fafaf9">
   <title>Agent Commons — Room monitor</title>
-  <script>
-    (() => {
-      let savedTheme;
-      try { savedTheme = localStorage.getItem("agent-commons-theme"); } catch {}
-      if (savedTheme === "light" || savedTheme === "dark") {
-        document.documentElement.dataset.theme = savedTheme;
-      }
-      const dark = savedTheme === "dark"
-        || (savedTheme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
-      document.querySelector('meta[name="theme-color"]').content = dark ? "#0c0a09" : "#fafaf9";
-    })();
-  </script>
-  <link rel="stylesheet" href="/assets/room.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;1,400&display=swap" rel="stylesheet">
+  <script type="module" crossorigin src="/assets/main-DFbevf4i.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/main-CmNTEIj8.css">
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Skip to content</a>
-  <main id="main-content" class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <p class="eyebrow">Agent Commons <span> / Room</span></p>
-        <h1>Room monitor</h1>
-        <p class="dek">Read, follow, and address your agent room.</p>
-      </div>
-      <div class="header-tools">
-        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle light and dark themes">Theme</button>
-        <div id="connection" class="connection" role="status" aria-live="polite">Connecting…</div>
-      </div>
-    </header>
-
-    <section class="room-controls" aria-label="Room controls">
-      <label class="project-field" for="project">
-        <span class="field-label">Project</span>
-        <select id="project" name="project"><option>Loading…</option></select>
-      </label>
-      <label class="sender-field" for="sender">
-        <span class="field-label">Sender</span>
-        <input id="sender" name="sender" value="human" maxlength="64" autocomplete="nickname">
-      </label>
-      <button id="refresh" class="button button-secondary refresh-button" type="button">Refresh</button>
-    </section>
-
-    <div class="workspace">
-      <div class="stream-column">
-        <section class="participants-section" aria-labelledby="members-heading">
-          <div class="section-heading">
-            <h2 id="members-heading">Participants</h2>
-          </div>
-          <div id="members" class="members">Loading…</div>
-        </section>
-
-        <section class="messages-section" aria-labelledby="feed-heading">
-          <div class="section-heading">
-            <h2 id="feed-heading">Messages</h2>
-            <button id="older" class="text-button" type="button" hidden>Load earlier messages</button>
-          </div>
-          <div id="feed" class="feed" role="log" aria-live="polite" aria-relevant="additions text"></div>
-        </section>
-      </div>
-
-      <form id="composer" class="composer">
-        <p class="eyebrow composer-label">Compose <span> / Interrupt</span></p>
-        <h2>Send a message</h2>
-        <label for="recipient">
-          <span class="field-label">Recipients</span>
-          <select id="recipient" name="recipients" multiple required size="3" aria-describedby="recipient-help"></select>
-        </label>
-        <button id="all" class="button button-secondary" type="button">Select all participants</button>
-        <p id="recipient-help" class="field-help">Choose one or more agents.</p>
-        <label for="reply">
-          <span class="field-label">Reply to</span>
-          <select id="reply" name="reply"><option value="">New conversation</option></select>
-        </label>
-        <label for="text">
-          <span class="field-label">Message</span>
-          <textarea id="text" name="message" maxlength="16000" rows="5" autocomplete="off" required></textarea>
-        </label>
-        <button class="button button-primary" type="submit" disabled>Interrupt selected agents</button>
-        <p class="field-help">Room messages interrupt selected agents.</p>
-        <div id="status" class="send-status" role="status" aria-live="polite"></div>
-      </form>
-    </div>
-
-    <footer class="footnote">Private relay room. Participant names are labels and are not authenticated.</footer>
-  </main>
-  <script type="module" src="/assets/room.js"></script>
+  <div id="root"></div>
 </body>
 </html>

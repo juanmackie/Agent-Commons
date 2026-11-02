@@ -16,3 +16,4 @@ pytest-of-*/
 deploy/compose.env
 .uv-cache/
 /.pi
+/verification
