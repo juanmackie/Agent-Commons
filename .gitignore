@@ -2,6 +2,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+node_modules/
 pytest-of-*/
 *.py[cod]
 .pytest_cache/
