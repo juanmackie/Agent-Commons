@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import UTC, datetime
 
 import roomctl
@@ -36,6 +37,11 @@ def test_doctor_reports_fresh_listener_and_does_not_change_config(tmp_path, monk
     path = _config(tmp_path, monkeypatch, config)
     before = path.read_bytes()
     monkeypatch.setattr(roomctl.time, "time", lambda: 1000)
+    monkeypatch.setattr(roomctl.os, "environ", {})
+    monkeypatch.setattr(roomctl.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        subprocess, "run", lambda *_args, **_kwargs: type("Result", (), {"stdout": ""})()
+    )
     last_seen = datetime.fromtimestamp(880.001, UTC).isoformat().replace("+00:00", "Z")
 
     class Client:
@@ -48,12 +54,17 @@ def test_doctor_reports_fresh_listener_and_does_not_change_config(tmp_path, monk
         def participants(self):
             return {"participants": [{"agent_id": "pi", "last_seen": last_seen}]}
 
+        def read(self, _after):
+            return {"messages": [{"text": "setup-check-test", "recipient": "pi", "sender": "peer"}]}
+
     monkeypatch.setattr(roomctl, "RelayClient", Client)
     assert roomctl.main(["doctor"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["ok"] is True
-    assert [check["name"] for check in report["checks"]] == ["relay", "participant", "listener"]
-    assert report["checks"][-1] == {"name": "listener", "ok": True, "detail": "last polled 120s ago"}
+    assert [check["name"] for check in report["checks"]] == [
+        "relay", "participant", "listener", "conflicts", "probe",
+    ]
+    assert report["checks"][2] == {"name": "listener", "ok": True, "detail": "last polled 120s ago"}
     assert path.read_bytes() == before
 
 
@@ -63,6 +74,11 @@ def test_doctor_fails_for_stale_listener_or_missing_project_member(tmp_path, mon
         {"api": "https://relay.tailnet", "project": "crew", "agent_id": "pi"},
     )
     monkeypatch.setattr(roomctl.time, "time", lambda: 1000)
+    monkeypatch.setattr(roomctl.os, "environ", {})
+    monkeypatch.setattr(roomctl.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        subprocess, "run", lambda *_args, **_kwargs: type("Result", (), {"stdout": ""})()
+    )
     last_seen = datetime.fromtimestamp(880, UTC).isoformat().replace("+00:00", "Z")
     members = [{"agent_id": "pi", "last_seen": last_seen}]
 
@@ -76,11 +92,14 @@ def test_doctor_fails_for_stale_listener_or_missing_project_member(tmp_path, mon
         def participants(self):
             return {"participants": members}
 
+        def read(self, _after):
+            return {"messages": []}
+
     monkeypatch.setattr(roomctl, "RelayClient", Client)
     assert roomctl.main(["doctor"]) == 1
     stale = json.loads(capsys.readouterr().out)
     assert stale["ok"] is False
-    assert stale["checks"][-1]["detail"] == "stale; last polled 120s ago"
+    assert stale["checks"][2]["detail"] == "stale; last polled 120s ago"
 
     members.clear()
     assert roomctl.main(["doctor"]) == 1
@@ -165,6 +184,137 @@ def test_setup_replace_preserves_cursor_for_same_agent(tmp_path, monkeypatch):
     }
 
 
+def test_agent_setup_joins_only_project_and_saves_config(tmp_path, monkeypatch, capsys):
+    path = _config(tmp_path, monkeypatch)
+    calls = []
+
+    class Client:
+        def __init__(self, api, project, agent):
+            calls.append(("init", api, project, agent))
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def projects(self):
+            return {"projects": [{"project": "crew"}]}
+
+        def join(self, project):
+            calls.append(("join", project))
+            return {"project": project, "agent": "pi", "created": False}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main([
+        "agent-setup", "--api", "https://relay.tailnet", "--agent", "pi"
+    ]) == 0
+    assert ("join", "crew") in calls
+    assert json.loads(path.read_text()) == {
+        "api": "https://relay.tailnet", "project": "crew", "agent_id": "pi",
+    }
+    assert json.loads(capsys.readouterr().out)["setup"] == "joined project"
+
+
+def test_agent_setup_does_not_use_host_agent_id_as_participant_name(tmp_path, monkeypatch, capsys):
+    path = _config(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENT_ID", "shared-host-name")
+
+    class Client:
+        def __init__(self, _api, _project, agent):
+            self.agent_id = agent
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def projects(self):
+            return {"projects": [{"project": "crew"}]}
+
+        def join(self, project):
+            return {"project": project, "agent": self.agent_id, "created": False}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["agent-setup", "--api", "https://relay.tailnet"]) == 0
+    saved = json.loads(path.read_text())
+    assert saved["agent_id"] != "shared-host-name"
+    assert saved["agent_id"].startswith("agent-")
+    assert json.loads(capsys.readouterr().out)["agent"] == saved["agent_id"]
+
+
+def test_agent_setup_requires_choice_for_multiple_projects_without_mutating(tmp_path, monkeypatch, capsys):
+    path = _config(tmp_path, monkeypatch)
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def projects(self):
+            return {"projects": [{"project": "alpha"}, {"project": "beta"}]}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main([
+        "agent-setup", "--api", "https://relay.tailnet", "--agent", "pi"
+    ]) == 1
+    assert not path.exists()
+    assert "alpha, beta" in capsys.readouterr().err
+
+
+def test_agent_setup_creates_named_project_only_after_explicit_opt_in(tmp_path, monkeypatch, capsys):
+    path = _config(tmp_path, monkeypatch)
+    calls = []
+
+    class Client:
+        def __init__(self, api, project, agent):
+            self.agent_id = agent
+            calls.append(("init", api, project, agent))
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def projects(self):
+            return {"projects": []}
+
+        def create(self):
+            calls.append(("create",))
+            return {"project": "crew", "agent": "pi", "created": True}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main([
+        "agent-setup", "--api", "https://relay.tailnet", "--agent", "pi",
+        "--project", "crew", "--allow-create",
+    ]) == 0
+    assert ("create",) in calls
+    assert json.loads(path.read_text()) == {
+        "api": "https://relay.tailnet", "project": "crew", "agent_id": "pi",
+    }
+    assert json.loads(capsys.readouterr().out)["setup"] == "created project"
+
+
+def test_agent_setup_refuses_project_creation_without_explicit_opt_in(tmp_path, monkeypatch, capsys):
+    path = _config(tmp_path, monkeypatch)
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            return {"status": "ok"}
+
+        def projects(self):
+            return {"projects": []}
+
+        def create(self, *_args, **_kwargs):
+            raise AssertionError("must not create without explicit opt-in")
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main([
+        "agent-setup", "--api", "https://relay.tailnet", "--agent", "pi",
+        "--project", "crew",
+    ]) == 1
+    assert not path.exists()
+    assert "--allow-create" in capsys.readouterr().err
+
+
 def test_join_automatically_joins_the_only_project(tmp_path, monkeypatch):
     path = _config(
         tmp_path, monkeypatch, {"api": "https://relay.tailnet", "agent_id": "pi"}
@@ -188,11 +338,12 @@ def test_join_automatically_joins_the_only_project(tmp_path, monkeypatch):
     assert ("join", "crew") in calls
 
 
-def test_join_creates_default_project_when_none_exist(tmp_path, monkeypatch):
+def test_join_refuses_to_create_a_project_without_explicit_approval(
+    tmp_path, monkeypatch, capsys
+):
     path = _config(
         tmp_path, monkeypatch, {"api": "https://relay.tailnet", "agent_id": "pi"}
     )
-    calls = []
 
     class Client:
         def __init__(self, *_args):
@@ -201,14 +352,13 @@ def test_join_creates_default_project_when_none_exist(tmp_path, monkeypatch):
         def projects(self):
             return {"projects": []}
 
-        def create(self, project):
-            calls.append(project)
-            return {"project": project, "agent": "pi", "created": True}
+        def create(self, *_args):
+            raise AssertionError("join must not create a project")
 
     monkeypatch.setattr(roomctl, "RelayClient", Client)
-    assert roomctl.main(["join"]) == 0
-    assert calls == ["agent-commons"]
-    assert json.loads(path.read_text())["project"] == "agent-commons"
+    assert roomctl.main(["join"]) == 1
+    assert "project" not in json.loads(path.read_text())
+    assert "--allow-create" in capsys.readouterr().err
 
 
 def test_join_requires_choice_when_several_projects_exist(tmp_path, monkeypatch, capsys):
@@ -283,33 +433,24 @@ def test_replacing_project_resets_old_cursor(tmp_path, monkeypatch):
     assert "cursor" not in saved
 
 
-def test_join_recovers_creation_race_by_joining_sole_project(tmp_path, monkeypatch):
+def test_join_does_not_create_project_when_project_list_is_empty(tmp_path, monkeypatch):
     path = _config(
         tmp_path, monkeypatch, {"api": "https://relay.tailnet", "agent_id": "pi"}
     )
-    project_lists = iter([[], [{"project": "raced"}]])
-    calls = []
 
     class Client:
         def __init__(self, *_args):
             pass
 
         def projects(self):
-            return {"projects": next(project_lists)}
+            return {"projects": []}
 
-        def create(self, project):
-            raise roomctl.RelayError(
-                "project exists", status=409, payload={"code": "projects_exist"}
-            )
-
-        def join(self, project):
-            calls.append(project)
-            return {"project": project, "agent": "pi", "created": False}
+        def create(self, *_args):
+            raise AssertionError("join must not create a project")
 
     monkeypatch.setattr(roomctl, "RelayClient", Client)
-    assert roomctl.main(["join"]) == 0
-    assert calls == ["raced"]
-    assert json.loads(path.read_text())["project"] == "raced"
+    assert roomctl.main(["join"]) == 1
+    assert "project" not in json.loads(path.read_text())
 
 
 def test_wait_filters_messages_and_saves_cursor_after_output(tmp_path, monkeypatch, capsys):

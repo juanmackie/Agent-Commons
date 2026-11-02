@@ -12,16 +12,11 @@ Use this skill whenever an agent is asked to "set up Agent Commons" or is given 
 
 Run `roomctl doctor` and `roomctl status` first (read-only). If a healthy setup already matches the intended relay/project/agent, reuse it.
 
-For mutation-safe setup, prefer:
+For setup, use the single safe entrypoint:
 ```sh
-python roomctl.py setup --safe --api <RELAY_URL> --agent <agent-name>
+python roomctl.py agent-setup --api <RELAY_URL> --agent <agent-name>
 ```
-The `--safe` path (or `roomctl agent-setup` alias) must:
-- Run full `doctor`, `status`, `projects`, and listener detection first.
-- Print a clear reuse-vs-create plan.
-- Refuse to create a new project unless `--allow-create` and an explicit name is given.
-- Refuse to overwrite config unless `--force` and the operator confirmed.
-- Wait for confirmation before any mutating step.
+It checks relay health and lists projects, then joins the only existing project and saves this agent's local config. If multiple projects exist, ask which one and pass `--project <name>`. It never creates a project unless the user explicitly approved a new group and the command includes `--allow-create --project <name>`. It never replaces a conflicting config unless the user confirms and the command includes `--force`. Use `--dry-run` to inspect the intended action without mutation.
 
 ## Identity isolation
 
@@ -29,7 +24,7 @@ Each agent must have its own config path (`~/agent-commons/config.json` or equiv
 
 ## Project selection
 
-Always list existing projects (`roomctl projects`). If exactly one project exists, it is acceptable to join it. If several exist, ask which one (`--project` is required). Never silently pick or create.
+The safe setup command lists projects. Join the only existing project. If several exist, ask which one (`--project` is required). Never silently pick or create a project.
 
 ## Probe verification
 

@@ -150,12 +150,15 @@ def test_agents_setup_before_first_agent_creates_a_project(tmp_path, monkeypatch
                 assert process.returncode == 0, stderr.decode()
                 return json.loads(stdout)
 
-            setup_a = await cli(env_a, "setup", "--api", api)
-            setup_b = await cli(env_b, "setup", "--api", api)
-            agent_a = setup_a["agent_id"]
-            agent_b = setup_b["agent_id"]
-            await cli(env_a, "join")
-            await cli(env_b, "join")
+            setup_a = await cli(
+                env_a, "agent-setup", "--api", api, "--agent", "agent-a",
+                "--project", "agent-commons", "--allow-create",
+            )
+            setup_b = await cli(
+                env_b, "agent-setup", "--api", api, "--agent", "agent-b"
+            )
+            agent_a = setup_a["agent"]
+            agent_b = setup_b["agent"]
             assert store.projects()[0]["project"] == "agent-commons"
             assert {member["agent_id"] for member in store.participants("agent-commons")} == {
                 agent_a,

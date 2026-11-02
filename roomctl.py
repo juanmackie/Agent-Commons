@@ -361,7 +361,7 @@ def main(argv=None):
         help="safe agent-facing setup entrypoint: doctor + status + projects + listener detection; refuses mutation without explicit flags",
     )
     agent_setup.add_argument("--api", required=False)
-    agent_setup.add_argument("--agent", default=os.getenv("AGENT_ID"))
+    agent_setup.add_argument("--agent", default=None)
     agent_setup.add_argument("--project", default=None)
     agent_setup.add_argument("--allow-create", action="store_true", help="explicitly allow creating a new project")
     agent_setup.add_argument("--force", action="store_true", help="force overwrite of config/state")
@@ -534,8 +534,16 @@ def main(argv=None):
             print(json.dumps(result | {"config": str(config_path())}, ensure_ascii=False))
             return 0
 
-        config = read_config()
-        client = RelayClient(config["api"], config.get("project"), config["agent_id"])
+        config = (
+            read_config()
+            if args.command not in {"agent-setup", "setup-safe"}
+            else {}
+        )
+        client = (
+            RelayClient(config["api"], config.get("project"), config["agent_id"])
+            if config
+            else None
+        )
         if args.command == "send":
             requested_thread = str(uuid.UUID(args.thread)) if args.thread else None
             db = state_db()
@@ -646,113 +654,93 @@ def main(argv=None):
             return 0
         elif args.command == "participants":
             print(json.dumps(client.participants(), ensure_ascii=False))
-        elif args.command == "agent-setup" or args.command == "setup-safe":
-            api = validate_api_url(args.api) if args.api else (existing.get("api") if (existing := read_config() if config_path().exists() else None) else None)
-            if not api:
-                raise RelayError("run `roomctl agent-setup --api <relay-url> --agent <name>` first, or provide --api")
-            agent = args.agent or (existing.get("agent_id") if existing else None) or os.getenv("AGENT_ID") or f"agent-{uuid.uuid4().hex[:8]}"
-            agent = validate_agent_id(agent)
-            try:
-                health = RelayClient(api, None, agent).healthz()
-                relay_ok = isinstance(health, dict) and health.get("status") == "ok"
-            except Exception:
-                relay_ok = False
-            try:
-                projects_result = RelayClient(api, None, agent).projects()
-                project_list = [entry.get("project") for entry in projects_result.get("projects", [])]
-            except Exception:
-                project_list = []
+        elif args.command in {"agent-setup", "setup-safe"}:
             existing_config = read_config() if config_path().exists() else {}
-            config_conflict = bool(existing_config and (existing_config.get("api") != api or existing_config.get("agent_id") != agent))
-            plan = {
-                "action": "agent-setup",
-                "api": api,
-                "agent": agent,
-                "relay_healthy": relay_ok,
-                "existing_config": bool(existing_config),
-                "config_conflict": config_conflict,
-                "existing_projects": project_list,
-                "requested_project": args.project,
-                "reuse_vs_create": {},
-                "requires_confirmation": False,
-                "mutating_steps": [],
-            }
-            if args.project:
-                if args.project in project_list:
-                    plan["reuse_vs_create"]["project"] = "reuse existing project " + args.project
-                else:
-                    if args.allow_create:
-                        plan["reuse_vs_create"]["project"] = "create new project " + args.project
-                        plan["mutating_steps"].append("create-project: " + args.project)
-                        plan["requires_confirmation"] = True
-                    else:
-                        raise RelayError(
-                            f"project '{args.project}' does not exist. Existing: {', '.join(project_list) or '(none)'}. Pass --allow-create only if you intend a new group."
-                        )
-            else:
+            api = validate_api_url(args.api or existing_config.get("api", ""))
+            agent = validate_agent_id(
+                args.agent or existing_config.get("agent_id") or f"agent-{uuid.uuid4().hex[:8]}"
+            )
+            client = RelayClient(api, None, agent)
+            health = client.healthz()
+            if not isinstance(health, dict) or health.get("status") != "ok":
+                raise RelayError(f"relay at {api} is not healthy; check the URL and tailnet access")
+            projects_result = client.projects()
+            project_list = [
+                entry.get("project")
+                for entry in projects_result.get("projects", [])
+                if isinstance(entry, dict) and isinstance(entry.get("project"), str)
+            ]
+
+            config_conflict = bool(
+                existing_config
+                and (
+                    existing_config.get("api") != api
+                    or existing_config.get("agent_id") != agent
+                )
+            )
+            saved_project = existing_config.get("project") if not config_conflict else None
+            if config_conflict and not (args.force or args.replace):
+                raise RelayError(
+                    "local config belongs to a different relay or agent; preserve it and use --force only after confirming replacement"
+                )
+            if (args.force or args.replace) and existing_config:
+                ensure_config_replace_allowed(True)
+
+            project = args.project or saved_project
+            if project is None:
                 if len(project_list) == 1:
-                    plan["reuse_vs_create"]["project"] = "reuse single existing project " + project_list[0]
-                    plan["reuse_vs_create"]["project_name"] = project_list[0]
-                elif len(project_list) == 0:
-                    plan["reuse_vs_create"]["project"] = "no existing projects; no automatic creation allowed without --project and --allow-create"
-                    plan["requires_confirmation"] = True
-                    plan["mutating_steps"].append("need --project + --allow-create to create a project")
-                else:
-                    plan["reuse_vs_create"]["project"] = "multiple existing projects; must specify --project: " + ", ".join(project_list)
-                    plan["requires_confirmation"] = True
-                    plan["mutating_steps"].append("specify --project from: " + ", ".join(project_list))
-            if existing_config:
-                if existing_config.get("api") == api and existing_config.get("agent_id") == agent:
-                    plan["reuse_vs_create"]["config"] = "reuse existing config"
-                else:
-                    if args.force or args.replace:
-                        plan["reuse_vs_create"]["config"] = "overwrite config (operator confirmed)"
-                        plan["mutating_steps"].append("overwrite config")
-                        plan["requires_confirmation"] = True
-                    else:
-                        plan["reuse_vs_create"]["config"] = "config conflict detected; preserve existing, use --force or --replace with confirmation"
-                        plan["mutating_steps"].append("config conflict: back up existing config before replacing")
-                        plan["requires_confirmation"] = True
-            else:
-                if args.dry_run:
-                    plan["reuse_vs_create"]["config"] = "dry-run: would create new config"
-                else:
-                    plan["reuse_vs_create"]["config"] = "create new config"
-                    plan["mutating_steps"].append("create new config")
-            if args.dry_run:
-                plan["dry_run"] = True
-                print(json.dumps(plan, ensure_ascii=False))
-                return 0
-            print(json.dumps(plan, ensure_ascii=False))
-            if plan.get("mutating_steps"):
-                if not args.force and not args.allow_create:
+                    project = project_list[0]
+                elif len(project_list) > 1:
                     raise RelayError(
-                        "Mutating step requires confirmation: " + "; ".join(plan["mutating_steps"]) + ". Pass --force for config overwrite or --allow-create + --project for new project."
+                        "several projects exist; choose one with --project: " + ", ".join(project_list)
                     )
-            if not plan.get("mutating_steps") and (plan.get("reuse_vs_create", {}).get("project") and plan.get("reuse_vs_create", {}).get("config") == "reuse existing config"):
+                elif not args.allow_create:
+                    raise RelayError(
+                        "no projects exist; creating one requires --allow-create and an explicit --project <name>"
+                    )
+                else:
+                    raise RelayError("--allow-create requires an explicit --project <name>")
+
+            if saved_project and project != saved_project and not (args.force or args.replace):
+                raise RelayError(
+                    "local config already selects a different project; use --force only after confirming the switch"
+                )
+            create_project = project not in project_list
+            if create_project and not args.allow_create:
+                raise RelayError(
+                    f"project '{project}' does not exist. Existing: {', '.join(project_list) or '(none)'}. Pass --allow-create only if you intend to create it."
+                )
+            if args.dry_run:
+                print(json.dumps({
+                    "action": "agent-setup",
+                    "api": api,
+                    "agent": agent,
+                    "relay_healthy": True,
+                    "project": project,
+                    "project_action": "create" if create_project else "join",
+                    "config_action": "replace" if config_conflict else "reuse" if existing_config else "create",
+                    "dry_run": True,
+                }, ensure_ascii=False))
                 return 0
-            if args.force or args.replace or args.allow_create:
-                agent_name = args.agent or agent
-                config_data = {"api": api, "agent_id": agent_name}
-                if args.project and args.project in project_list:
-                    config_data["project"] = args.project
-                elif args.project and args.allow_create:
-                    config_data["project"] = args.project
-                if args.allow_create and args.project and args.project not in project_list:
-                    client_for_create = RelayClient(api, args.project, agent_name)
-                    client_for_create.create()
-                    config_data["project"] = args.project
-                elif args.project and args.project in project_list:
-                    client_for_join = RelayClient(api, args.project, agent_name)
-                    client_for_join.join(args.project)
-                    config_data["project"] = args.project
-                if config_path().exists() and (args.force or args.replace):
-                    old_config = read_config()
-                    if config_identity(old_config) == config_identity(config_data) and "cursor" in old_config:
-                        config_data["cursor"] = old_config["cursor"]
-                write_config(config_data)
-                return 0
-            print(json.dumps(plan | {"message": "agent-setup complete. Review reuse-vs-create plan above. Pass --force/--allow-create/--replace to execute mutation."}, ensure_ascii=False))
+
+            project_client = RelayClient(api, project, agent)
+            result = (
+                project_client.create()
+                if create_project
+                else project_client.join(project)
+            )
+            config_data = {"api": api, "project": project, "agent_id": agent}
+            if (
+                existing_config
+                and config_identity(existing_config) == config_identity(config_data)
+                and "cursor" in existing_config
+            ):
+                config_data["cursor"] = existing_config["cursor"]
+            write_config(config_data)
+            print(json.dumps(result | {
+                "config": str(config_path()),
+                "setup": "created project" if create_project else "joined project",
+            }, ensure_ascii=False))
             return 0
         elif args.command == "status":
             existing_config = read_config() if config_path().exists() else {}
