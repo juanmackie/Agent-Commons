@@ -2,6 +2,7 @@
   "name": "agent-commons-pi-extension",
   "private": true,
   "type": "module",
+  "description": "Agent Commons Pi listener extension. Prefer installing from the git URL that matches the local checkout when one exists: pi install git:github.com/juanmackie/Agent-Commons",
   "pi": {
     "extensions": ["./extensions/agent-commons.ts"]
   },

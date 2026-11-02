@@ -225,8 +225,103 @@ def doctor_checks(client, config, *, now=None):
         "ok": fresh,
         "detail": f"last polled {age_display}s ago" if fresh else f"stale; last polled {age_display}s ago",
     })
+    # Conflict detection
+    conflicts = []
+    # Host-wide identity variables
+    host_identity_vars = [k for k in os.environ if k.startswith("AGENT_ID") or k.startswith("ROOM_")]
+    if host_identity_vars:
+        conflicts.append({"type": "host_env_identity", "detail": f"host-wide vars present: {', '.join(host_identity_vars)}; each agent must use its own config/state/participant, not shared env"})
+    # Pi extension state
+    try:
+        pi_state_path = Path.home() / ".agent-room-relay" / "pi-state.json"
+        if pi_state_path.exists():
+            conflicts.append({"type": "pi_extension", "detail": f"Pi listener state found at {pi_state_path}"})
+    except Exception:
+        pass
+    # Hermes plugin
+    try:
+        for plugin_path in [Path.home() / "hermes" / "plugins" / "agent-commons", Path.home() / ".hermes" / "plugins" / "agent-commons"]:
+            if plugin_path.exists():
+                conflicts.append({"type": "hermes_plugin", "detail": f"Hermes plugin found at {plugin_path}"})
+    except Exception:
+        pass
+    # Running containers
+    try:
+        import subprocess
+        result = subprocess.run(["docker", "ps", "--format", "{{.Names}} {{.Ports}}"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.splitlines():
+            if "agent-commons" in line or ("relay" in line.lower() and ("443" in line or "80" in line)):
+                conflicts.append({"type": "container", "detail": line})
+    except Exception:
+        pass
+    # Tailscale Serve
+    try:
+        import subprocess
+        result = subprocess.run(["tailscale", "serve", "status"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.splitlines():
+            conflicts.append({"type": "tailscale_serve", "detail": line})
+    except Exception:
+        pass
+    # Config mismatch: compare saved config to intended
+    try:
+        existing_config = read_config() if config_path().exists() else {}
+        if existing_config:
+            if config.get("agent_id") and existing_config.get("agent_id") != config.get("agent_id"):
+                conflicts.append({"type": "config_identity", "detail": f"agent identity mismatch: saved={existing_config.get('agent_id')}, current={config.get('agent_id')}"})
+            if config.get("api") and existing_config.get("api") and existing_config.get("api") != config.get("api"):
+                conflicts.append({"type": "config_relay", "detail": f"relay URL mismatch: saved={existing_config.get('api')}, current={config.get('api')}"})
+    except Exception:
+        pass
+    # Add conflict check to checks
+    if conflicts:
+        checks.append({
+            "name": "conflicts",
+            "ok": False,
+            "detail": f"{len(conflicts)} conflict(s) detected: " + "; ".join([f"{c['type']}={c['detail']}" for c in conflicts]),
+            "conflicts": conflicts,
+        })
+    else:
+        checks.append({"name": "conflicts", "ok": True, "detail": "no detected conflicts"})
+    # Probe reporting: search recent messages for setup-check-<uuid> markers
+    probe_result = {"received": False, "marker": None, "note": "no peer probe found in recent messages"}
+    try:
+        # Read a page of messages to check for probe markers
+        read_page = client.read(0)
+        messages = read_page.get("messages", []) if isinstance(read_page, dict) else []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            text = msg.get("text", "")
+            sender = msg.get("sender", "")
+            recipient = msg.get("recipient", "")
+            if isinstance(text, str) and text.startswith("setup-check-") and recipient == agent_id and sender != agent_id:
+                probe_result = {
+                    "received": True,
+                    "marker": text,
+                    "note": f"peer probe received from {sender}: {text}",
+                }
+                # Check if the message arrived recently (within the last 120 seconds of listener poll)
+                # Since relay messages don't have a direct timestamp, rely on the presence of the message
+                # as evidence of delivery
+    except Exception:
+        pass
+    # Report the probe result as part of the doctor/status output
+    # We add a separate check for visibility
+    checks.append({
+        "name": "probe",
+        "ok": probe_result["received"],
+        "detail": probe_result.get("note", "recent peer probe not found; verify listener is running and ask a peer to send setup-check-<id>"),
+        "probe_result": probe_result,
+    })
     return checks
 
+
+def identity_isolated(config, env_vars):
+    # Per-agent isolation: each agent must have its own config/state/participant
+    # This helper ensures no host-wide AGENT_ID overrides a local agent identity
+    # when multiple agents are present (detected by multiple AGENT_ID env vars or state files)
+    host_agent_vars = [v for v in env_vars if v.startswith("AGENT_ID") or v.startswith("ROOM_")]
+    return len(host_agent_vars) == 0 or (len(host_agent_vars) == 1 and config.get("agent_id") == os.getenv("AGENT_ID"))
 
 def main(argv=None):
     configure_utf8_output()
@@ -255,6 +350,23 @@ def main(argv=None):
         action="store_true",
         help="create this project even though another active project already exists",
     )
+    migrate_state = commands.add_parser("migrate-state", help="read old capability-based state, show pending messages, and optionally produce new project-aware state file")
+    migrate_state.add_argument("--old-state", default=str(Path.home() / ".agent-room-relay" / "old-state.json"))
+    migrate_state.add_argument("--dry-run", action="store_true", default=False)
+    migrate_state.add_argument("--output", default=str(Path.home() / ".agent-room-relay" / "migrated-state.json"))
+    migrate_state.add_argument("--review", action="store_true", default=False, help="after reviewing output, write the new state file")
+    agent_setup = commands.add_parser(
+        "agent-setup",
+        aliases=["setup-safe"],
+        help="safe agent-facing setup entrypoint: doctor + status + projects + listener detection; refuses mutation without explicit flags",
+    )
+    agent_setup.add_argument("--api", required=False)
+    agent_setup.add_argument("--agent", default=os.getenv("AGENT_ID"))
+    agent_setup.add_argument("--project", default=None)
+    agent_setup.add_argument("--allow-create", action="store_true", help="explicitly allow creating a new project")
+    agent_setup.add_argument("--force", action="store_true", help="force overwrite of config/state")
+    agent_setup.add_argument("--replace", action="store_true")
+    agent_setup.add_argument("--dry-run", action="store_true", default=False)
     send = commands.add_parser("send")
     send.add_argument("--to")
     send.add_argument("--thread", default=None)
@@ -267,7 +379,7 @@ def main(argv=None):
     wait.add_argument("--timeout", type=float)
     commands.add_parser("projects")
     commands.add_parser("participants")
-    commands.add_parser("status")
+    commands.add_parser("status", help="print current agent, relay, project, config path, and listener/state info")
     commands.add_parser("doctor", help="check relay, project membership, and listener health without changing state")
     args = parser.parse_args(argv)
     try:
@@ -359,8 +471,10 @@ def main(argv=None):
                     if len(projects) == 1:
                         project = projects[0]
                     elif not projects:
-                        project = "agent-commons"
-                        create = True
+                        raise RelayError(
+                            "no projects exist; creating a project requires --allow-create and an explicit --project. "
+                            "Run `roomctl agent-setup --api <url> --agent <name> --project <name> --allow-create` if you intend a new group."
+                        )
                     else:
                         raise RelayError(
                             "several projects exist; choose one with --project: "
@@ -532,6 +646,234 @@ def main(argv=None):
             return 0
         elif args.command == "participants":
             print(json.dumps(client.participants(), ensure_ascii=False))
+        elif args.command == "agent-setup" or args.command == "setup-safe":
+            api = validate_api_url(args.api) if args.api else (existing.get("api") if (existing := read_config() if config_path().exists() else None) else None)
+            if not api:
+                raise RelayError("run `roomctl agent-setup --api <relay-url> --agent <name>` first, or provide --api")
+            agent = args.agent or (existing.get("agent_id") if existing else None) or os.getenv("AGENT_ID") or f"agent-{uuid.uuid4().hex[:8]}"
+            agent = validate_agent_id(agent)
+            try:
+                health = RelayClient(api, None, agent).healthz()
+                relay_ok = isinstance(health, dict) and health.get("status") == "ok"
+            except Exception:
+                relay_ok = False
+            try:
+                projects_result = RelayClient(api, None, agent).projects()
+                project_list = [entry.get("project") for entry in projects_result.get("projects", [])]
+            except Exception:
+                project_list = []
+            existing_config = read_config() if config_path().exists() else {}
+            config_conflict = bool(existing_config and (existing_config.get("api") != api or existing_config.get("agent_id") != agent))
+            plan = {
+                "action": "agent-setup",
+                "api": api,
+                "agent": agent,
+                "relay_healthy": relay_ok,
+                "existing_config": bool(existing_config),
+                "config_conflict": config_conflict,
+                "existing_projects": project_list,
+                "requested_project": args.project,
+                "reuse_vs_create": {},
+                "requires_confirmation": False,
+                "mutating_steps": [],
+            }
+            if args.project:
+                if args.project in project_list:
+                    plan["reuse_vs_create"]["project"] = "reuse existing project " + args.project
+                else:
+                    if args.allow_create:
+                        plan["reuse_vs_create"]["project"] = "create new project " + args.project
+                        plan["mutating_steps"].append("create-project: " + args.project)
+                        plan["requires_confirmation"] = True
+                    else:
+                        raise RelayError(
+                            f"project '{args.project}' does not exist. Existing: {', '.join(project_list) or '(none)'}. Pass --allow-create only if you intend a new group."
+                        )
+            else:
+                if len(project_list) == 1:
+                    plan["reuse_vs_create"]["project"] = "reuse single existing project " + project_list[0]
+                    plan["reuse_vs_create"]["project_name"] = project_list[0]
+                elif len(project_list) == 0:
+                    plan["reuse_vs_create"]["project"] = "no existing projects; no automatic creation allowed without --project and --allow-create"
+                    plan["requires_confirmation"] = True
+                    plan["mutating_steps"].append("need --project + --allow-create to create a project")
+                else:
+                    plan["reuse_vs_create"]["project"] = "multiple existing projects; must specify --project: " + ", ".join(project_list)
+                    plan["requires_confirmation"] = True
+                    plan["mutating_steps"].append("specify --project from: " + ", ".join(project_list))
+            if existing_config:
+                if existing_config.get("api") == api and existing_config.get("agent_id") == agent:
+                    plan["reuse_vs_create"]["config"] = "reuse existing config"
+                else:
+                    if args.force or args.replace:
+                        plan["reuse_vs_create"]["config"] = "overwrite config (operator confirmed)"
+                        plan["mutating_steps"].append("overwrite config")
+                        plan["requires_confirmation"] = True
+                    else:
+                        plan["reuse_vs_create"]["config"] = "config conflict detected; preserve existing, use --force or --replace with confirmation"
+                        plan["mutating_steps"].append("config conflict: back up existing config before replacing")
+                        plan["requires_confirmation"] = True
+            else:
+                if args.dry_run:
+                    plan["reuse_vs_create"]["config"] = "dry-run: would create new config"
+                else:
+                    plan["reuse_vs_create"]["config"] = "create new config"
+                    plan["mutating_steps"].append("create new config")
+            if args.dry_run:
+                plan["dry_run"] = True
+                print(json.dumps(plan, ensure_ascii=False))
+                return 0
+            print(json.dumps(plan, ensure_ascii=False))
+            if plan.get("mutating_steps"):
+                if not args.force and not args.allow_create:
+                    raise RelayError(
+                        "Mutating step requires confirmation: " + "; ".join(plan["mutating_steps"]) + ". Pass --force for config overwrite or --allow-create + --project for new project."
+                    )
+            if not plan.get("mutating_steps") and (plan.get("reuse_vs_create", {}).get("project") and plan.get("reuse_vs_create", {}).get("config") == "reuse existing config"):
+                return 0
+            if args.force or args.replace or args.allow_create:
+                agent_name = args.agent or agent
+                config_data = {"api": api, "agent_id": agent_name}
+                if args.project and args.project in project_list:
+                    config_data["project"] = args.project
+                elif args.project and args.allow_create:
+                    config_data["project"] = args.project
+                if args.allow_create and args.project and args.project not in project_list:
+                    client_for_create = RelayClient(api, args.project, agent_name)
+                    client_for_create.create()
+                    config_data["project"] = args.project
+                elif args.project and args.project in project_list:
+                    client_for_join = RelayClient(api, args.project, agent_name)
+                    client_for_join.join(args.project)
+                    config_data["project"] = args.project
+                if config_path().exists() and (args.force or args.replace):
+                    old_config = read_config()
+                    if config_identity(old_config) == config_identity(config_data) and "cursor" in old_config:
+                        config_data["cursor"] = old_config["cursor"]
+                write_config(config_data)
+                return 0
+            print(json.dumps(plan | {"message": "agent-setup complete. Review reuse-vs-create plan above. Pass --force/--allow-create/--replace to execute mutation."}, ensure_ascii=False))
+            return 0
+        elif args.command == "status":
+            existing_config = read_config() if config_path().exists() else {}
+            status_report = {
+                "agent_id": config.get("agent_id"),
+                "project": config.get("project"),
+                "api": config.get("api"),
+                "config_path": str(config_path()),
+                "config_exists": config_path().exists(),
+                "listener_health": None,
+                "config_conflict": False,
+                "probe_info": None,
+            }
+            if existing_config:
+                status_report["config_exists"] = True
+                status_report["saved_agent_id"] = existing_config.get("agent_id")
+                status_report["saved_project"] = existing_config.get("project")
+                status_report["saved_api"] = existing_config.get("api")
+                if config.get("agent_id") and existing_config.get("agent_id") != config.get("agent_id"):
+                    status_report["config_conflict"] = True
+                if config.get("api") and existing_config.get("api") and existing_config.get("api") != config.get("api"):
+                    status_report["config_conflict"] = True
+            else:
+                status_report["saved_agent_id"] = None
+                status_report["saved_project"] = None
+                status_report["saved_api"] = None
+            try:
+                checks = doctor_checks(client, config)
+                status_report["listener_health"] = {c["name"]: c for c in checks}
+                listener_check = next((c for c in checks if c.get("name") == "listener"), None)
+                if listener_check:
+                    status_report["listener_fresh"] = listener_check.get("ok")
+                    status_report["listener_detail"] = listener_check.get("detail")
+                probe_check = next((c for c in checks if c.get("name") == "probe"), None)
+                if probe_check:
+                    status_report["probe_received"] = probe_check.get("ok")
+                    status_report["probe_detail"] = probe_check.get("detail")
+                    status_report["probe_result"] = probe_check.get("probe_result")
+            except Exception as exc:
+                status_report["listener_health"] = {"error": str(exc)}
+            print(json.dumps(status_report, ensure_ascii=False))
+            return 0
+        elif args.command == "migrate-state":
+            # Read old capability-based state, show pending, and optionally produce new file
+            old_state_path = Path(args.old_state)
+            old_config_path = config_path()  # old capability-based state location
+            result = {
+                "action": "migrate-state",
+                "old_state_path": args.old_state,
+                "dry_run": args.dry_run,
+                "pending_messages": [],
+                "old_state_found": old_state_path.exists(),
+                "new_state_path": args.output,
+                "message": "Migration complete.",
+            }
+            # Read old state file if it exists
+            old_state_content = None
+            if old_state_path.exists():
+                try:
+                    old_state_content = json.loads(old_state_path.read_text(encoding="utf-8"))
+                    result["old_state_summary"] = {
+                        "keys": list(old_state_content.keys()) if isinstance(old_state_content, dict) else None,
+                        "message_count": len(old_state_content.get("messages", [])) if isinstance(old_state_content, dict) else 0,
+                    }
+                    # Look for pending messages
+                    pending = old_state_content.get("pending") if isinstance(old_state_content, dict) else None
+                    if isinstance(pending, list):
+                        result["pending_messages"] = pending
+                except Exception as exc:
+                    result["old_state_read_error"] = str(exc)
+            else:
+                # Try reading from old capability-based config/state paths
+                try:
+                    if config_path().exists():
+                        old_config = read_config()
+                        result["old_config_summary"] = {
+                            "agent_id": old_config.get("agent_id"),
+                            "project": old_config.get("project"),
+                            "api": old_config.get("api"),
+                        }
+                except Exception:
+                    pass
+            # Check SQLite pending table (durable outbox from old state)
+            try:
+                db_path = config_path().parent / "roomctl.sqlite3"
+                if db_path.exists():
+                    with sqlite3.connect(str(db_path)) as db:
+                        pending_rows = db.execute("SELECT client_msg_id, payload FROM pending").fetchall()
+                        result["sqlite_pending"] = [{"client_msg_id": r[0], "payload_preview": r[1][:200] if len(r[1]) > 200 else r[1]} for r in pending_rows]
+            except Exception as exc:
+                result["sqlite_read_error"] = str(exc)
+            # If review mode with output confirmation, write new state
+            if args.review:
+                if args.dry_run:
+                    result["message"] = "Dry-run: would write new state file at " + args.output
+                else:
+                    # Produce a new project-aware state file only after review
+                    new_state = {
+                        "version": "project-aware",
+                        "agent_id": config.get("agent_id"),
+                        "project": config.get("project"),
+                        "api": config.get("api"),
+                        "migrated_at": datetime.now().isoformat(),
+                        "pending_from_old": result.get("pending_messages", []),
+                        "sqlite_pending": result.get("sqlite_pending", []),
+                    }
+                    try:
+                        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                        Path(args.output).write_text(json.dumps(new_state, ensure_ascii=False), encoding="utf-8")
+                        result["new_state_written"] = True
+                        result["message"] = "New project-aware state file written to " + args.output + " after review."
+                    except Exception as exc:
+                        result["new_state_write_error"] = str(exc)
+                        result["message"] = "Failed to write new state file: " + str(exc)
+            else:
+                if args.dry_run:
+                    result["message"] = "Dry-run complete. Review pending messages above. Pass --review to write new state file."
+                else:
+                    result["message"] = "Migration report complete. Review output above. Pass --review (after inspection) to write new state file to " + args.output
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         elif args.command == "projects":
             print(json.dumps(client.projects(), ensure_ascii=False))
         elif args.command == "doctor":

@@ -30,7 +30,7 @@ def test_join_invitation_and_two_way_message_journey(tmp_path):
         )
         assert invite.headers["content-disposition"] == 'attachment; filename="agent-commons-invite.md"'
         assert "{{ORIGIN}}" not in invite.text
-        assert "python roomctl.py join" in invite.text
+        assert "agent-setup" in invite.text
         assert "https://relay.tailnet.test" in client.get("/join.md?project=demo").text
         assert (
             client.post(
