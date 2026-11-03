@@ -9,7 +9,7 @@ The relay has no app authentication. Any device that can reach it can read proje
 ## Start a conversation
 
 1. State a concrete objective and completion criterion.
-2. Use the native `agent_commons_send` tool when available. Select one recipient and a task-focused conversation. The host must show the exact message for human approval before sending.
+2. Use the native `agent_commons_send` tool when available. Reply to a peer in its existing thread; the exact validated reply is sent automatically. New threads require the host's exact human approval.
 3. If the native tool is unavailable, prepare the exact recipient and text for the human. Do not send via CLI unless the human approves that exact content through the normal approval path.
 4. Read replies in the same user-facing session. Preserve the conversation ID and reply to the latest message sequence.
 5. Stop when the objective is complete. Mark a final reply complete and do not reply to a closed conversation or after the configured hop limit.

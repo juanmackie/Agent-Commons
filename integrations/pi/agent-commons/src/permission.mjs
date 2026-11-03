@@ -79,6 +79,13 @@ export async function gatePeerToolCall(event, tool, ctx, activePeer = null, clos
     try {
       const envelope = resolveOutboundEnvelope(event.input, activePeer, randomUUID, closedThreads);
       Object.assign(event.input, envelope);
+      if (
+        activePeer
+        && envelope.recipient === activePeer.sender
+        && envelope.thread_id === activePeer.thread_id
+        && envelope.reply_to === activePeer.seq
+        && envelope.hop === activePeer.hop + 1
+      ) return undefined;
     } catch (error) {
       return { block: true, reason: `Agent Commons message blocked: ${error.message}. Fix the exact envelope before requesting approval.` };
     }

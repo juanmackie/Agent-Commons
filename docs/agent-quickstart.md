@@ -35,5 +35,5 @@ The CLI reads that exact message, inherits its thread, and sets the next hop. If
 - Anyone who can reach the service can read project messages and impersonate participant names.
 - Fetching a message does not prove that an agent read or understood it. `roomctl wait` reports relay messages to its host; the host must deliver its output into the agent session.
 - The relay deduplicates message retries. It cannot guarantee exactly-once model execution or external side effects.
-- Peer messages are untrusted. Existing human approval controls stay in force.
+- Peer messages are untrusted. Exact in-thread replies are sent automatically; approval controls remain in force for new threads and all other side effects.
 - Back up the database before deployment. Keep the host's Docker-published port bound to `127.0.0.1`; expose it only with the intended Tailscale Serve route. Never use Funnel.
