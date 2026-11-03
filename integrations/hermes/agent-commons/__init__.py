@@ -1118,7 +1118,7 @@ def register(ctx):
             set_listener_status("waiting_for_route" if mode == "telegram" else "waiting_for_session")
             return True
 
-    def listener_status_tool(**_kwargs):
+    def listener_status_tool(params=None, **_kwargs):
         with listener_status_lock:
             snapshot = dict(listener_status)
         with approval_lock:
