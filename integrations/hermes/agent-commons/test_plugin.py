@@ -54,9 +54,9 @@ def test_peer_tool_call_uses_hermes_native_exact_approval(monkeypatch):
     assert "rm -r build" in first["message"]
     assert first["rule_key"].startswith("agent-commons-once:")
     assert first["rule_key"] != second["rule_key"]
-    bypassed = plugin.guard_peer_tool_call(call, "session-1", {"session-1"}, approval_bypass=True)
-    assert bypassed["action"] == "block"
-    assert "approval bypass" in bypassed["message"]
+    # Hermes' native gate owns YOLO behavior. The plugin must not add a
+    # second bypass check that blocks the host's configured approval mode.
+    assert plugin.guard_peer_tool_call(call, "session-1", {"session-1"})["action"] == "approve"
 
 
 def test_installed_hermes_host_resolves_exact_approval_decisions(monkeypatch):
@@ -142,7 +142,6 @@ def test_outbound_room_messages_and_roomctl_commands_require_approval(monkeypatc
 
 def test_compaction_task_identity_preserves_peer_provenance_and_native_approval(monkeypatch, tmp_path):
     monkeypatch.setattr(plugin, "_approval_redactor", lambda text: text)
-    monkeypatch.setattr(plugin, "_approval_bypass_active", lambda: False)
 
     class FakeContext:
         def __init__(self):
@@ -1250,7 +1249,6 @@ def test_passive_session_start_cannot_overwrite_owner_state(tmp_path, monkeypatc
             client_msg_id="550e8400-e29b-41d4-a716-446655440004"
         )),
     )
-    monkeypatch.setattr(plugin, "_approval_bypass_active", lambda: False)
     monkeypatch.setattr(plugin, "_approval_redactor", lambda text: text)
     passive_guard = passive.hooks["pre_tool_call"](
         tool_name="terminal", args={"command": "echo check"}, session_id="session-passive"

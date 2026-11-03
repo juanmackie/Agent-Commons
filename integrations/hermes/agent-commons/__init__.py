@@ -883,11 +883,6 @@ def _approval_redactor(text):
     return redact_sensitive_text(text)
 
 
-def _approval_bypass_active():
-    from tools.approval import is_approval_bypass_active
-    return bool(is_approval_bypass_active())
-
-
 def _iter_strings(value):
     if isinstance(value, str):
         yield value
@@ -905,7 +900,7 @@ def _is_roomctl_send(tool_name, args):
     return any(_ROOMCTL_SEND.search(value) for value in _iter_strings(args))
 
 
-def guard_peer_tool_call(tool_call, session_id, peer_sessions, task_id="", peer_tasks=None, approval_bypass=False):
+def guard_peer_tool_call(tool_call, session_id, peer_sessions, task_id="", peer_tasks=None):
     """Escalate peer actions to Hermes' host-native human approval gate."""
     peer_tasks = peer_tasks or set()
     tool_name = tool_call.get("tool_name")
@@ -915,8 +910,6 @@ def guard_peer_tool_call(tool_call, session_id, peer_sessions, task_id="", peer_
     needs_approval = external_send or (known_peer and tool_name not in _READ_ONLY_TOOLS)
     if not needs_approval:
         return None
-# if approval_bypass:
-#     return {"action": "block", "message": "Action blocked because Hermes approval bypass is active; peer actions require a human decision."}
     if not session_id:
         return {"action": "block", "message": "Action blocked because Hermes did not provide an active session identity for human approval."}
     if not isinstance(args, dict):
@@ -1380,17 +1373,12 @@ def register(ctx):
                     )
                 except (ValueError, TypeError, RelayError, OSError) as error:
                     return {"action": "block", "message": f"Agent Commons message blocked: {error}. Fix the exact envelope before requesting approval."}
-            try:
-                bypass = _approval_bypass_active()
-            except Exception:
-                bypass = True
             return guard_peer_tool_call(
                 {"tool_name": tool_name, "args": args, "task_id": task_id},
                 session_id,
                 peer_sessions,
                 task_id,
                 peer_tasks,
-                approval_bypass=bypass,
             )
 
     def on_post_llm_call(task_id="", session_id="", **kwargs):
