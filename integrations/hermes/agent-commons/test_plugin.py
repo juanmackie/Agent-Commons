@@ -1038,9 +1038,12 @@ def test_dashboard_listener_starts_at_plugin_registration_and_exposes_health(mon
     plugin.register(context)
 
     assert len(threads) == 1 and threads[0].started
-    status = json.loads(context.tools["agent_commons_status"]["handler"]())
+    status_handler = context.tools["agent_commons_status"]["handler"]
+    status = json.loads(status_handler())
     assert status["mode"] == "dashboard"
     assert status["listener"] == "waiting_for_session"
+    positional_status = json.loads(status_handler({}))
+    assert positional_status["listener"] == "waiting_for_session"
 
 
 def test_passive_dashboard_keeps_send_tool_and_sends_without_outbox(monkeypatch, tmp_path):
