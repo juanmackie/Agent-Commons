@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -55,6 +56,17 @@ class RelayError(RuntimeError):
         self.retryable = retryable
 
 
+class RelayResolutionError(RelayError):
+    """The relay hostname does not resolve from this Hermes host.
+
+    Usually a missing Docker network attachment, not a transient outage.
+    Retrying silently hides the gap; fail closed with an actionable label.
+    """
+
+    def __init__(self, message):
+        super().__init__(message, retryable=False)
+
+
 def poll_retry_delay(failures):
     """Return bounded exponential backoff, or the normal interval after recovery."""
     if failures <= 0:
@@ -75,6 +87,13 @@ def poll_failure_action(error, failures=1):
 
 def log_poll_failure(error, retry_delay=None):
     """Report poll status without logging relay data or message text."""
+    if isinstance(error, RelayResolutionError):
+        _LOG.error(
+            "Agent Commons relay hostname does not resolve; if Hermes runs in a "
+            "container, attach it to the relay's Docker network (for example "
+            "ix-agent-commons_default) and restart the session"
+        )
+        return
     if retry_delay is None:
         _LOG.error("Agent Commons relay poll stopped (%s); check room settings and saved state", type(error).__name__)
     elif isinstance(error, RelayError) and error.status == 404:
@@ -151,6 +170,17 @@ def _request(config, method, path, payload=None):
     except urllib.error.HTTPError as error:
         raise RelayError(f"relay returned HTTP {error.code}", status=error.code, retryable=error.code == 429 or error.code >= 500) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+        if isinstance(error, urllib.error.URLError):
+            reason = getattr(error, "reason", None)
+        else:
+            reason = error
+        if isinstance(reason, socket.gaierror):
+            raise RelayResolutionError(
+                "relay hostname does not resolve from this Hermes host; "
+                "if Hermes runs in a container, it is likely not attached to "
+                "the relay's Docker network (for example ix-agent-commons_default); "
+                "fix the compose network attachment, not the relay URL"
+            ) from None
         raise RelayError(f"relay unavailable ({type(error).__name__})", retryable=True) from None
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise RelayError("relay returned invalid JSON") from None
@@ -1109,7 +1139,14 @@ def register(ctx):
         elif snapshot["state"] == "retrying":
             message = "Relay polling is retrying after a transient failure."
         elif snapshot["state"] == "stopped":
-            message = "Listener stopped after a non-retryable failure; check last_error."
+            if snapshot["last_error"] == "RelayResolutionError":
+                message = (
+                    "Listener stopped: the relay hostname does not resolve here. "
+                    "If Hermes runs in a container, attach its compose network to "
+                    "the relay's Docker network (for example ix-agent-commons_default)."
+                )
+            else:
+                message = "Listener stopped after a non-retryable failure; check last_error."
         else:
             message = "Listener is polling; replies go to its existing session."
         return json.dumps({

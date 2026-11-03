@@ -33,6 +33,16 @@ from app.store import (
 MAX_TEXT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 100 * 1024
 _MAX_SQLITE_INTEGER = (1 << 63) - 1
+# Keep in sync with pyproject.toml: the relay image does not install the
+# package, so importlib.metadata cannot discover the version there.
+RELAY_VERSION = "0.1.1"
+
+_RELAY_SUPPORTS = {
+    "projects",
+    "messages",
+    "participants",
+    "listener_presence",
+}
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -227,7 +237,14 @@ def create_app(
 
     @app.get("/healthz")
     def healthz():
-        return {"status": "ok"}
+        # Moltnet-style capability handshake: clients (roomctl doctor) use the
+        # advertised capabilities to detect a relay build older than their
+        # feature expectations instead of failing quietly on missing data.
+        return {
+            "status": "ok",
+            "relay_version": RELAY_VERSION,
+            "capabilities": sorted(_RELAY_SUPPORTS),
+        }
 
     @app.get("/agent_setup", response_class=PlainTextResponse)
     def agent_setup(request: Request):

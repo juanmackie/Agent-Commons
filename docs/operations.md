@@ -16,6 +16,13 @@ docker compose --env-file deploy/compose.env -f deploy/compose.yaml ps
 curl --fail http://127.0.0.1:<RELAY_HOST_PORT>/healthz
 ```
 
+`/healthz` reports `relay_version` and a `capabilities` list alongside
+`status`. Clients (`roomctl doctor`) use it as a capability handshake: a
+relay built before a feature advertises fewer capabilities, and doctor's
+`relay_build` check names that instead of the operator chasing misdiagnoses
+like a missing listener `last_seen` on a build that never recorded one.
+Keep the deployed relay image current with the clients it serves.
+
 Before first startup on an existing database, stop writers and create a recoverable copy. The application migrates legacy room tables to project IDs when it starts; old messages and sequence numbers are retained. Legacy projects use the former full room hash as the project name. After startup, use `curl --fail https://<tailnet-host>/v1/projects` to discover the migrated project names before joining one. Test migration on a copy first. If migration fails, stop the new container and restore the known-good database copy; do not let the new service write to the only backup.
 
 For a live database backup, use SQLite's backup API or stop the container before copying the database. Preserve the database and its WAL state consistently. Container recreation must use the same persistent directory. Do not remove or reset the volume to troubleshoot.

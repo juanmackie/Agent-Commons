@@ -49,7 +49,7 @@ def test_doctor_reports_fresh_listener_and_does_not_change_config(tmp_path, monk
             pass
 
         def healthz(self):
-            return {"status": "ok"}
+            return {"status": "ok", "relay_version": "0.1.0", "capabilities": ["listener_presence"]}
 
         def participants(self):
             return {"participants": [{"agent_id": "pi", "last_seen": last_seen}]}
@@ -62,9 +62,9 @@ def test_doctor_reports_fresh_listener_and_does_not_change_config(tmp_path, monk
     report = json.loads(capsys.readouterr().out)
     assert report["ok"] is True
     assert [check["name"] for check in report["checks"]] == [
-        "relay", "participant", "listener", "conflicts", "probe",
+        "relay", "relay_build", "participant", "listener", "conflicts", "probe",
     ]
-    assert report["checks"][2] == {"name": "listener", "ok": True, "detail": "last polled 120s ago"}
+    assert report["checks"][3] == {"name": "listener", "ok": True, "detail": "last polled 120s ago"}
     assert path.read_bytes() == before
 
 
@@ -87,7 +87,7 @@ def test_doctor_fails_for_stale_listener_or_missing_project_member(tmp_path, mon
             pass
 
         def healthz(self):
-            return {"status": "ok"}
+            return {"status": "ok", "relay_version": "0.1.0", "capabilities": ["listener_presence"]}
 
         def participants(self):
             return {"participants": members}
@@ -99,7 +99,7 @@ def test_doctor_fails_for_stale_listener_or_missing_project_member(tmp_path, mon
     assert roomctl.main(["doctor"]) == 1
     stale = json.loads(capsys.readouterr().out)
     assert stale["ok"] is False
-    assert stale["checks"][2]["detail"] == "stale; last polled 120s ago"
+    assert stale["checks"][3]["detail"] == "stale; last polled 120s ago"
 
     members.clear()
     assert roomctl.main(["doctor"]) == 1
@@ -108,6 +108,44 @@ def test_doctor_fails_for_stale_listener_or_missing_project_member(tmp_path, mon
         "name": "participant", "ok": False, "detail": "agent has not joined this project",
     }
     assert path.exists()
+
+
+def test_doctor_flags_relay_builds_without_the_capability_handshake(tmp_path, monkeypatch, capsys):
+    path = _config(
+        tmp_path, monkeypatch,
+        {"api": "https://relay.tailnet", "project": "crew", "agent_id": "pi"},
+    )
+    monkeypatch.setattr(roomctl.time, "time", lambda: 1000)
+    monkeypatch.setattr(roomctl.os, "environ", {})
+    monkeypatch.setattr(roomctl.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        subprocess, "run", lambda *_args, **_kwargs: type("Result", (), {"stdout": ""})()
+    )
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        def healthz(self):
+            # An old relay build: healthz predates the capability handshake.
+            return {"status": "ok"}
+
+        def participants(self):
+            return {"participants": [{"agent_id": "pi"}]}
+
+        def read(self, _after):
+            return {"messages": []}
+
+    monkeypatch.setattr(roomctl, "RelayClient", Client)
+    assert roomctl.main(["doctor"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is False
+    build_check = next(
+        check for check in report["checks"] if check["name"] == "relay_build"
+    )
+    assert build_check["ok"] is False
+    assert "capability handshake" in build_check["detail"] and "relay is updated" in build_check["detail"]
+    assert "https://relay.tailnet" not in json.dumps(report)
 
 
 def test_doctor_reports_relay_failure_without_exposing_error_details(tmp_path, monkeypatch, capsys):

@@ -511,6 +511,40 @@ def test_poll_failure_action_retries_only_transient_or_missing_project_errors():
     assert plugin.poll_failure_action(RuntimeError("state unreadable"), 1) is None
 
 
+def test_unresolved_relay_hostname_fails_closed_with_network_hint(monkeypatch):
+    import socket
+    import urllib.error
+
+    class UnresolvedRelayOpener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+
+    monkeypatch.setattr(plugin, "_opener", UnresolvedRelayOpener())
+    config = {"api": "http://relay:8080", "project": "demo", "agent_id": "hermes"}
+    with pytest.raises(plugin.RelayResolutionError) as failure:
+        plugin.read_page(config, 0)
+    assert failure.value.retryable is False
+    assert plugin.poll_failure_action(failure.value, 1) is None
+    assert "ix-agent-commons_default" in str(failure.value)
+    assert "relay:8080" not in str(failure.value)
+
+
+def test_unreachable_relay_port_stays_retryable(monkeypatch):
+    import urllib.error
+
+    class RefusingRelayOpener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    monkeypatch.setattr(plugin, "_opener", RefusingRelayOpener())
+    config = {"api": "http://relay:8080", "project": "demo", "agent_id": "hermes"}
+    with pytest.raises(plugin.RelayError) as failure:
+        plugin.read_page(config, 0)
+    assert not isinstance(failure.value, plugin.RelayResolutionError)
+    assert failure.value.retryable is True
+    assert plugin.poll_failure_action(failure.value, 1) == 6
+
+
 def test_rejected_outbound_completion_releases_thread_reservation():
     message = {
         "client_msg_id": MESSAGE_ID, "recipient": "pi", "thread_id": THREAD,

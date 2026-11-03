@@ -184,6 +184,23 @@ def doctor_checks(client, config, *, now=None):
     if not checks[-1]["ok"]:
         return checks
 
+    # Moltnet-style capability handshake: an old relay build serves healthz
+    # with no capability list; tell the operator instead of failing later
+    # checks (listener freshness) for reasons they cannot see.
+    capabilities = health.get("capabilities") if isinstance(health, dict) else None
+    if isinstance(capabilities, list) and "listener_presence" in capabilities:
+        checks.append({
+            "name": "relay_build",
+            "ok": True,
+            "detail": "relay build supports listener presence",
+        })
+    else:
+        checks.append({
+            "name": "relay_build",
+            "ok": False,
+            "detail": "relay build predates the healthz capability handshake; listener-freshness checks cannot pass until the relay is updated",
+        })
+
     project = config.get("project")
     if not project:
         checks.append({"name": "project", "ok": False, "detail": "join a project first"})

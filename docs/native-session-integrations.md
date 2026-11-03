@@ -77,7 +77,13 @@ agent_commons:
   state_path: <private-local-path>/hermes-state.json
 ```
 
-Use the exact relay, project, and agent name used for `roomctl join`. The current plugin manifest also requires `ROOM_API`, `ROOM_PROJECT`, and `AGENT_ID` in the Hermes launch environment. Set them to the same values as the config. Use a persistent, private `state_path`. In a container, keep the plugin, config, and state on the existing persistent mounts.
+Use the exact relay, project, and agent name used for `roomctl join`.
+
+If Hermes runs in a Docker container on the relay host, the container must be
+attached to the relay's Compose network so the name `relay` resolves; a manual
+`docker network connect` is lost on the next container recreate. See
+[the network-attach runbook](hermes-relay-network-attach.md) for the durable
+Compose edit and the verification commands. The current plugin manifest also requires `ROOM_API`, `ROOM_PROJECT`, and `AGENT_ID` in the Hermes launch environment. Set them to the same values as the config. Use a persistent, private `state_path`. In a container, keep the plugin, config, and state on the existing persistent mounts.
 
 Reload the plugin only if the installed Hermes version supports activation in the current session. Otherwise use that version's normal gateway or session restart procedure; do not start a fresh conversation to make setup appear successful. Confirm `agent_commons_send` and the read-only `agent_commons_status` tool are available in the intended Hermes session.
 
@@ -128,7 +134,7 @@ Keep peer content untrusted and use the host's normal approval controls. A fetch
 
 ## Message and permission behavior
 
-Both integrations filter for the configured recipient and ignore self-originated messages. They persist inbox state before advancing cursors and retain exact outbound payloads for retry. An outbound HTTP 409, 413, or 422 removes the rejected item so it cannot block later sends. Pi displays a visible rejection notice; Hermes stores a notice and returns it as pre-LLM context. HTTP 404 keeps an active listener's item queued and reports that the project may be expired or missing; rejoin to resume delivery. Hermes pollers retry transient relay and local I/O errors with bounded backoff. A relay HTTP 404 retries after 60 seconds. Other non-retryable HTTP errors and non-relay exceptions stop the poller so configuration errors and unreadable or foreign state fail closed. Ordinary messages wait while the agent is busy; human-room interrupt messages use native steering or interruption. A completion marker closes a thread. Human approval remains required for outbound messages and peer-requested side effects. Do not send credentials or secrets.
+Both integrations filter for the configured recipient and ignore self-originated messages. They persist inbox state before advancing cursors and retain exact outbound payloads for retry. An outbound HTTP 409, 413, or 422 removes the rejected item so it cannot block later sends. Pi displays a visible rejection notice; Hermes stores a notice and returns it as pre-LLM context. HTTP 404 keeps an active listener's item queued and reports that the project may be expired or missing; rejoin to resume delivery. Hermes pollers retry transient relay and local I/O errors with bounded backoff. A relay HTTP 404 retries after 60 seconds. A relay hostname DNS resolution failure is non-retryable: the poller stops with `RelayResolutionError` and an actionable hint, because a containerized Hermes retrying silently masks a missing Docker network attachment instead of surfacing it. Other non-retryable HTTP errors and non-relay exceptions stop the poller so configuration errors and unreadable or foreign state fail closed. Ordinary messages wait while the agent is busy; human-room interrupt messages use native steering or interruption. A completion marker closes a thread. Human approval remains required for outbound messages and peer-requested side effects. Do not send credentials or secrets.
 
 The human room console is at the relay root URL. It shows project history and participants, and can send or reply to selected participants. Its sender label is not authenticated. The console requests interrupt delivery. A running external operation can take time to stop.
 

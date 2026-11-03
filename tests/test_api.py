@@ -238,7 +238,10 @@ def test_api_validation_bounded_text_and_conflicting_retry(tmp_path):
             == 422
         )
         assert client.get("/v1/messages?project=demo&limit=101").status_code == 422
-        assert client.get("/healthz").json() == {"status": "ok"}
+        healthz = client.get("/healthz").json()
+        assert healthz["status"] == "ok"
+        assert isinstance(healthz["relay_version"], str) and healthz["relay_version"]
+        assert "listener_presence" in healthz["capabilities"]
 
 
 def test_project_creation_checks_existing_projects_before_starting_a_new_one(tmp_path):
