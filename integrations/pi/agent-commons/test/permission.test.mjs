@@ -26,7 +26,7 @@ test("built-in read-only tools run during a peer thread even without annotations
   assert.equal(prompted, false);
 });
 
-test("peer side effects and every outbound relay message require human review", () => {
+test("peer side effects and new outbound relay messages require human review", () => {
   assert.equal(shouldGateToolCall("bash", true), true);
   assert.equal(shouldGateToolCall("agent_commons_send", false), true);
   assert.equal(shouldGateToolCall("read", false), false);
@@ -96,11 +96,43 @@ test("legacy roomctl sends are gated as outbound messages", () => {
   assert.equal(shouldGateToolCall("bash", false, { command: "roomctl read --after 3" }), false);
 });
 
-test("relay message approval shows the exact recipient and message body", async () => {
-  let question;
+test("exact peer replies send without a human prompt", async () => {
+  let prompted = false;
   const sendEvent = {
     toolName: "agent_commons_send",
     input: { text: "Check the project status" },
+  };
+  const result = await gatePeerToolCall(sendEvent, { name: "agent_commons_send" }, {
+    hasUI: true,
+    ui: { confirm: async () => { prompted = true; return false; } },
+  }, {
+    sender: "hermes",
+    thread_id: "550e8400-e29b-41d4-a716-446655440001",
+    seq: 12,
+    hop: 3,
+    complete: false,
+  });
+  assert.equal(result, undefined);
+  assert.equal(prompted, false);
+  assert.equal(sendEvent.input.recipient, "hermes");
+  assert.equal(sendEvent.input.thread_id, "550e8400-e29b-41d4-a716-446655440001");
+  assert.equal(sendEvent.input.reply_to, 12);
+  assert.equal(sendEvent.input.hop, 4);
+});
+
+test("new relay threads still require exact human approval", async () => {
+  let question;
+  const sendEvent = {
+    toolName: "agent_commons_send",
+    input: {
+      recipient: "pi",
+      thread_id: "550e8400-e29b-41d4-a716-446655440004",
+      reply_to: null,
+      hop: 0,
+      client_msg_id: "550e8400-e29b-41d4-a716-446655440005",
+      complete: false,
+      text: "Start a separate task",
+    },
   };
   const result = await gatePeerToolCall(sendEvent, { name: "agent_commons_send" }, {
     hasUI: true,
@@ -113,14 +145,7 @@ test("relay message approval shows the exact recipient and message body", async 
     complete: false,
   });
   assert.equal(result.block, true);
-  assert.equal(sendEvent.input.recipient, "hermes");
-  assert.equal(sendEvent.input.thread_id, "550e8400-e29b-41d4-a716-446655440001");
-  assert.equal(sendEvent.input.reply_to, 12);
-  assert.equal(sendEvent.input.hop, 4);
-  assert.match(question, /hermes/);
-  assert.match(question, /Check the project status/);
-  assert.match(question, /thread_id/);
-  assert.match(question, /reply_to/);
+  assert.match(question, /Start a separate task/);
 });
 
 test("denial and missing UI block peer-requested actions", async () => {

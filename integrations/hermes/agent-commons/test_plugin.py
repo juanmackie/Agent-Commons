@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 import json
 import subprocess
@@ -20,6 +21,16 @@ THREAD = "550e8400-e29b-41d4-a716-446655440001"
 MESSAGE_ID = "550e8400-e29b-41d4-a716-446655440002"
 
 
+@pytest.fixture(autouse=True)
+def hermes_gateway_environment_isolated(monkeypatch):
+    """Treat ordinary plugin tests as non-gateway processes.
+
+    The gateway marker is inherited by tests launched inside Hermes and changes
+    listener ownership; gateway-specific tests opt in explicitly with setenv.
+    """
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+
+
 def peer_message(**overrides):
     return {
         "sender": "pi",
@@ -40,6 +51,25 @@ def test_listener_status_tool_stays_read_only_for_peer_sessions():
         {"tool_name": "agent_commons_status", "args": {}},
         "session-1", {"session-1"},
     ) is None
+
+
+def test_recipient_poll_warning_reports_unjoined_and_stale_recipients():
+    now = 1_800_000_000
+    assert "has not joined" in plugin.recipient_poll_warning(
+        {"recipient_joined": False, "recipient_last_seen": None}, "pi", now=now
+    )
+    assert "never polled" in plugin.recipient_poll_warning(
+        {"recipient_joined": True, "recipient_last_seen": None}, "pi", now=now
+    )
+    stale = datetime.datetime.fromtimestamp(now - 120, datetime.UTC).isoformat().replace("+00:00", "Z")
+    assert "at least 2 minutes" in plugin.recipient_poll_warning(
+        {"recipient_joined": True, "recipient_last_seen": stale}, "pi", now=now
+    )
+    fresh = datetime.datetime.fromtimestamp(now - 119, datetime.UTC).isoformat().replace("+00:00", "Z")
+    assert plugin.recipient_poll_warning(
+        {"recipient_joined": True, "recipient_last_seen": fresh}, "pi", now=now
+    ) == ""
+    assert plugin.recipient_poll_warning({"seq": 1}, "pi", now=now) == ""
 
 
 def test_peer_tool_call_uses_hermes_native_exact_approval(monkeypatch):
@@ -122,7 +152,7 @@ def test_missing_identity_and_rotated_session_cannot_drop_peer_provenance(monkey
     assert rotated["action"] == "approve"
 
 
-def test_outbound_room_messages_and_roomctl_commands_require_approval(monkeypatch):
+def test_new_outbound_room_messages_and_roomctl_commands_require_approval(monkeypatch):
     monkeypatch.setattr(plugin, "_approval_redactor", lambda text: text)
     send = plugin.guard_peer_tool_call(
         {"tool_name": "agent_commons_send", "args": {"recipient": "pi", "text": "check status"}},
@@ -158,7 +188,12 @@ def test_compaction_task_identity_preserves_peer_provenance_and_native_approval(
         def register_tool(self, name, **kwargs):
             self.tools[name] = kwargs
 
-    monkeypatch.setattr(plugin, "plugin_settings", lambda: {"state_path": str(tmp_path / "state.json")})
+    monkeypatch.setattr(plugin, "plugin_settings", lambda: {
+        "api": "http://relay",
+        "project": "demo",
+        "agent_id": "hermes",
+        "state_path": str(tmp_path / "state.json"),
+    })
     context = FakeContext()
     plugin.register(context)
     marker = plugin.make_peer_text(peer_message())
@@ -167,6 +202,39 @@ def test_compaction_task_identity_preserves_peer_provenance_and_native_approval(
         platform="cli", conversation_history=[],
     )
     assert pre_llm and "untrusted" in pre_llm["context"].lower()
+
+    exact_reply = {
+        "recipient": "pi",
+        "thread_id": THREAD,
+        "reply_to": 8,
+        "hop": 1,
+        "text": "I will check that now.",
+        "complete": False,
+        "client_msg_id": "a9507d5c-fef2-4d6f-bd09-ec5f4f2f8021",
+    }
+    assert context.hooks["pre_tool_call"](
+        tool_name="agent_commons_send", args=exact_reply,
+        task_id="task-1", session_id="session-1",
+    ) is None
+    untracked_reply = {**exact_reply, "client_msg_id": "a9507d5c-fef2-4d6f-bd09-ec5f4f2f8024"}
+    assert context.hooks["pre_tool_call"](
+        tool_name="agent_commons_send", args=untracked_reply,
+        task_id="task-1", session_id="",
+    )["action"] == "block"
+
+    new_thread = {
+        "recipient": "pi",
+        "thread_id": "a9507d5c-fef2-4d6f-bd09-ec5f4f2f8022",
+        "reply_to": None,
+        "hop": 0,
+        "text": "Start a separate task",
+        "complete": False,
+        "client_msg_id": "a9507d5c-fef2-4d6f-bd09-ec5f4f2f8023",
+    }
+    assert context.hooks["pre_tool_call"](
+        tool_name="agent_commons_send", args=new_thread,
+        task_id="task-1", session_id="session-1",
+    )["action"] == "approve"
 
     rotated = context.hooks["pre_tool_call"](
         tool_name="terminal", args={"command": "rm -r build"},
@@ -1073,7 +1141,9 @@ def test_passive_dashboard_keeps_send_tool_and_sends_without_outbox(monkeypatch,
     })
     monkeypatch.setattr(plugin, "acquire_owner_lock", lambda _path: (_ for _ in ()).throw(FileExistsError("owned")))
     monkeypatch.setattr(plugin.threading, "Thread", FakeThread)
-    monkeypatch.setattr(plugin, "send_message", lambda _config, **_kwargs: {"seq": 12})
+    monkeypatch.setattr(plugin, "send_message", lambda _config, **_kwargs: {
+        "seq": 12, "recipient_joined": False, "recipient_last_seen": None,
+    })
     monkeypatch.setattr(plugin, "queue_outbound_message", lambda *_args: pytest.fail("passive send must not use the outbox"))
     context = FakeContext()
 
@@ -1086,6 +1156,8 @@ def test_passive_dashboard_keeps_send_tool_and_sends_without_outbox(monkeypatch,
 
     assert result["sent"] is True and result["seq"] == 12
     assert "listening window" in result["message"].lower()
+    assert "has not joined" in result["message"]
+    assert "never polled" in result["message"]
     assert not state_file.exists()
     assert threads  # A passive process keeps retrying ownership.
 
@@ -1122,6 +1194,8 @@ def test_dashboard_mode_messaging_gateway_is_passive(monkeypatch, tmp_path):
     status = json.loads(context.tools["agent_commons_status"]["handler"]())
     assert status["listener"] == "passive"
     assert not status["owns_listener"]
+    assert "dashboard/tui session must poll" in status["message"].lower()
+    assert "process peer messages through telegram" in status["message"].lower()
     assert "agent_commons_send" in context.tools
 
 
