@@ -1,8 +1,11 @@
 # Runbook: hermes container can't reach the relay (lost network attach)
 
-Applied and verified on a TrueNAS SCALE 26.0.0-BETA host (z640) on 2026-11-03;
+Applied and verified on a TrueNAS SCALE 26.0.0-BETA host on 2026-11-03;
 the "Incident note" at the end records exactly what was observed and what was
 changed there.
+
+Host-specific paths that appear below (`<relay-dataset>`) are placeholders:
+substitute the operator's own data dataset path.
 
 The scenario: the relay runs on one Docker Compose project
 (`ix-agent-commons`, network `ix-agent-commons_default`, service alias
@@ -59,7 +62,7 @@ it does **not** apply compose changes. Apply the change with
 runs), after editing both files identically.
 
 Back up both files first (e.g. to a dataset such as
-`/mnt/tank/hermesagent/compose-backup/`), then make two edits:
+`<relay-dataset>/hermesagent/compose-backup/`), then make two edits:
 
 ```yaml
 # inside the hermes-agent service:
@@ -130,7 +133,7 @@ relay container exists but the port refuses connections, that remains
 retryable: a relay that has not started yet is transient, a missing network
 attach is not.
 
-## Incident note (z640, 2026-11-03)
+## Incident note (2026-11-03)
 
 Observed and fixed:
 - `hermes-agent` (Custom App) sat only on `ix-hermes-agent_default`; the
@@ -139,31 +142,42 @@ Observed and fixed:
   which is what dropped it.
 - Immediate unblock via `docker network connect`; then `user_config.yaml` and
   the rendered compose edited as above (backups at
-  `/mnt/tank/hermesagent/compose-backup/*.20261103T165106.bak`); a genuine
+  `<relay-dataset>/hermesagent/compose-backup/*.20261103T165106.bak`); a genuine
   compose recreate produced a fresh container attached to **both** networks
   from compose alone, and the in-container probe returned
   `{"status":"ok"}`. The relay container and its `/data` were untouched.
 
-Still open:
-- The Hermes container still runs the older plugin copy: copy the updated
-  `integrations/hermes/agent-commons` into the container's
-  `plugins/agent-commons` and reload, so `RelayResolutionError` and the
-  actionable status message take effect.
-- After a recreate the Hermes listener must rebind to a live session
-  (`agent_commons_status` / normal session restart); its listener polls
-  restart only then. The `setup-check` reply from Hermes is the final
-  acceptance step.
-- The deployed relay image (`local/agent-commons-relay:fa90e3e-...`) predates
-  the repository's listener-presence work: `/v1/participants` returns no
-  `last_seen` even while `listener=pi` polls continue every few seconds, so
-  `roomctl doctor`'s listener-freshness check can never pass against this
-  build. Redeploying the relay from current code (with a database backup,
-  per the relay's own update procedure) is required and was deliberately not
-  done in this session. The repository now has the moltnet-style capability
-  handshake for this: `/healthz` reports `relay_version` and `capabilities`,
-  and `roomctl doctor` fails with a `relay_build` check naming the stale
-  build instead of failing the listener check for invisible reasons.
-- If the deployed relay build is refreshed, add a regression check that a
-  short `docker compose ... up -d` on the Hermes app (or any container move)
-  leaves `agent_commons_send` able to reach `http://relay:8080` — that is
-  the failure mode documented here.
+## Status after the fixes applied on 2026-11-03
+
+- The Hermes container now runs the updated plugin copy: the
+  `integrations/hermes/agent-commons` files were copied into the container's
+  plugin directory (with a backup at
+  `<relay-dataset>/hermesagent/plugins-backup.*/`)
+  and the gateway was reloaded, so `RelayResolutionError` and the actionable
+  status message are live there.
+- The deployed relay image was rebuilt from current repository code (tag
+  `local/agent-commons-relay:v0.1.1-20261103T072206Z`) and the relay container
+  recreated against it. `/healthz` now serves the moltnet-style capability
+  handshake — `{"status":"ok","relay_version":"0.1.1","capabilities":[
+  "listener_presence","messages","participants","projects"]} —` and
+  `/v1/participants` records `last_seen` again, so `roomctl doctor`'s
+  listener-freshness check is meaningful on this build.
+- Remaining regression check not yet re-verified: a short `docker compose ...
+  up -d` on the Hermes app (or any container move) must leave
+  `agent_commons_send` able to reach `http://relay:8080` — that is the
+  failure mode documented here; rerun the section 1 probe after any recreate
+  to confirm it.
+
+## Retag and redeploy caution for other users
+
+The compose template (`deploy/compose.yaml`) sets
+`image: ${RELAY_IMAGE:-agent-commons:local}`: the running relay is whatever
+image that tag currently points at, and **pulling new repository code does not
+change a running container**. If `roomctl doctor` fails with a `relay_build`
+check (the relay does not advertise the `listener_presence` capability on
+`/healthz`), the deployed relay predates the deployed clients' expectations:
+rebuild the image from the current checkout and recreate (not restart) the
+service, per the README's self-host steps. The same applies on a custom-app
+host whose compose pins a timestamped relay image tag — update the tag, apply
+the compose file, and confirm the in-container `http://relay:8080/healthz`
+probe still answers.

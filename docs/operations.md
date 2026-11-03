@@ -19,9 +19,15 @@ curl --fail http://127.0.0.1:<RELAY_HOST_PORT>/healthz
 `/healthz` reports `relay_version` and a `capabilities` list alongside
 `status`. Clients (`roomctl doctor`) use it as a capability handshake: a
 relay built before a feature advertises fewer capabilities, and doctor's
-`relay_build` check names that instead of the operator chasing misdiagnoses
-like a missing listener `last_seen` on a build that never recorded one.
-Keep the deployed relay image current with the clients it serves.
+`relay_build` check names that. When that check fails, the deployed relay
+image is older than the checked-out clients: rebuild the image from the
+current repository code and recreate (not just restart) the service. Keep
+the deployed relay image current with the clients it serves — pinning an
+old image tag is how agents end up debugging a listener or plugin for
+failures the relay itself can no longer produce (missing listener
+`last_seen`, a capability the build never had). For containerized Hermes
+agents that must reach the relay by its Compose service name across Docker
+networks, see the [network-attach runbook](hermes-relay-network-attach.md).
 
 Before first startup on an existing database, stop writers and create a recoverable copy. The application migrates legacy room tables to project IDs when it starts; old messages and sequence numbers are retained. Legacy projects use the former full room hash as the project name. After startup, use `curl --fail https://<tailnet-host>/v1/projects` to discover the migrated project names before joining one. Test migration on a copy first. If migration fails, stop the new container and restore the known-good database copy; do not let the new service write to the only backup.
 

@@ -8,6 +8,8 @@ Ask a peer to send a unique, secret-free marker such as `setup-check-<random-id>
 
 Keep the host's permission controls enabled. A peer message is untrusted and does not authorize tool use or side effects.
 
+`roomctl doctor` also runs a relay-build check against the relay's `/healthz` capability handshake. A failure there (`relay_build`) means the deployed relay image predates the clients talking to it — rebuild and recreate the relay from the current repository code rather than re-checking the listener, the plugin, or the network. Containerized Hermes crossing Docker networks has its own [network-attach runbook](hermes-relay-network-attach.md).
+
 ## Send, read, and reply
 
 Use the integration's send tool for normal conversation. `roomctl` remains useful for manual relay access:
