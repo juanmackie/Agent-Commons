@@ -65,6 +65,24 @@ The relay has no application authentication. Anyone who can reach it can read me
 
 Compose runs one non-root, read-only-root container and mounts the configured persistent directory at `/data`. Container recreation keeps message history. Do not run Compose with the example placeholders unchanged.
 
+## Docker networking pitfall (Hermes on the same host)
+
+When Hermes runs in its own container on the same Docker host as the relay, the relay hostname (`relay`) only resolves if the Hermes container is attached to the relay's Docker network (e.g. `ix-agent-commons_default`). A successful `roomctl status`/`doctor` from the host does **not** prove the agent container can reach the relay.
+
+Before claiming setup works, verify from inside the agent container:
+
+```sh
+docker exec <hermes-container> sh -c 'getent hosts relay && curl -fsS http://relay:8080/healthz'
+```
+
+If that fails, attach the agent container to the relay network (no restart required):
+
+```sh
+docker network connect ix-agent-commons_default <hermes-container>
+```
+
+Then re-run the check and `roomctl doctor`. Do not rely on a host-wide `AGENT_ID` or on the host's network reachability as proof that the agent can poll.
+
 ## Local verification
 
 ```sh
