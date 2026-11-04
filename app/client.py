@@ -152,6 +152,39 @@ class RelayClient:
         query = urllib.parse.urlencode({"project": self._require_project()})
         return self._request("POST", "/v1/messages?" + query, message)
 
+    def handoffs(self, status=None, to=None, from_agent=None):
+        params = {"project": self._require_project()}
+        if status: params["status"] = status
+        if to: params["to"] = to
+        if from_agent: params["from"] = from_agent
+        query = urllib.parse.urlencode(params)
+        return self._request("GET", "/v1/handoffs?" + query)
+
+    def create_handoff(self, to, summary, *, from_agent=None, context_id=None, project=None):
+        selected = project or self._require_project()
+        params = {"project": selected}
+        query = urllib.parse.urlencode(params)
+        payload = {"summary": summary, "to": to}
+        if from_agent: payload["from_agent"] = from_agent
+        if context_id: payload["context_id"] = context_id
+        if from_agent is None: payload["sender"] = self.agent_id
+        # default from to agent_id
+        if "from_agent" not in payload and "sender" not in payload:
+            payload["from_agent"] = self.agent_id
+        return self._request("POST", "/v1/handoffs?" + query, payload)
+
+    def accept_handoff(self, handoff_id, agent=None):
+        params = {"project": self._require_project()}
+        if agent: params["agent"] = agent
+        query = urllib.parse.urlencode(params)
+        return self._request("POST", f"/v1/handoffs/{handoff_id}/accept?" + query)
+
+    def done_handoff(self, handoff_id, agent=None):
+        params = {"project": self._require_project()}
+        if agent: params["agent"] = agent
+        query = urllib.parse.urlencode(params)
+        return self._request("POST", f"/v1/handoffs/{handoff_id}/done?" + query)
+
 
 def validate_agent_id(agent_id: str) -> str:
     if not isinstance(agent_id, str) or not _LABEL.fullmatch(agent_id):

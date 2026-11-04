@@ -110,6 +110,18 @@ class ProjectStore:
             recipient TEXT NOT NULL, PRIMARY KEY(project_id,client_msg_id), UNIQUE(project_id,seq));
         """)
         participant_columns = {row[1] for row in self.db.execute("PRAGMA table_info(participants)")}
+        # Ensure handoffs table exists (idempotent).
+        self.db.executescript("""
+          CREATE TABLE IF NOT EXISTS handoffs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+            from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,
+            summary TEXT NOT NULL, context_id TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            accepted_by TEXT, accepted_at INTEGER, created_at INTEGER NOT NULL);
+          CREATE INDEX IF NOT EXISTS idx_handoffs_project ON handoffs(project_id);
+        """)
+
         if "last_seen" not in participant_columns:
             self.db.execute("ALTER TABLE participants ADD COLUMN last_seen INTEGER")
         project_columns = {row[1] for row in self.db.execute("PRAGMA table_info(projects)")}
@@ -328,10 +340,127 @@ class ProjectStore:
             ).fetchone()
         return self._timestamp(row["last_seen"]) if row and row["last_seen"] is not None else None
 
+    def create_handoff(self, project_id, from_agent, to_agent, summary, context_id=None):
+        self._validate_membership(project_id, from_agent)
+        self._validate_membership(project_id, to_agent) if False else None
+        # validate agent labels
+        if not isinstance(from_agent, str) or not _AGENT.fullmatch(from_agent):
+            raise ValueError("invalid agent name")
+        if not isinstance(to_agent, str) or not _AGENT.fullmatch(to_agent):
+            raise ValueError("invalid agent name")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("summary must not be empty")
+        now = self.clock()
+        with self._transaction():
+            self._project(project_id, now)
+            cursor = self.db.execute(
+                "INSERT INTO handoffs(project_id,from_agent,to_agent,summary,context_id,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                (project_id, from_agent, to_agent, summary, context_id, "open", now),
+            )
+            row = self.db.execute("SELECT * FROM handoffs WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return self._handoff(row)
+
+    def list_handoffs(self, project_id, status=None, to=None, from_agent=None):
+        now = self.clock()
+        with self._lock:
+            self._project(project_id, now)
+            q = "SELECT * FROM handoffs WHERE project_id=?"
+            params = [project_id]
+            if status:
+                q += " AND status=?"; params.append(status)
+            if to:
+                q += " AND to_agent=?"; params.append(to)
+            if from_agent:
+                q += " AND from_agent=?"; params.append(from_agent)
+            q += " ORDER BY id"
+            rows = self.db.execute(q, params).fetchall()
+        return [self._handoff(r) for r in rows]
+
+    def get_handoff(self, project_id, handoff_id):
+        now = self.clock()
+        with self._lock:
+            self._project(project_id, now)
+            row = self.db.execute("SELECT * FROM handoffs WHERE project_id=? AND id=?", (project_id, handoff_id)).fetchone()
+        if row is None:
+            raise KeyError
+        return self._handoff(row)
+
+    def accept_handoff(self, project_id, handoff_id, agent_id=None):
+        now = self.clock()
+        with self._transaction():
+            self._project(project_id, now)
+            row = self.db.execute("SELECT * FROM handoffs WHERE project_id=? AND id=?", (project_id, handoff_id)).fetchone()
+            if row is None:
+                raise KeyError
+            accepted_by = agent_id if agent_id is not None else row["accepted_by"]
+            self.db.execute(
+                "UPDATE handoffs SET status='accepted', accepted_by=?, accepted_at=? WHERE project_id=? AND id=?",
+                (accepted_by, now, project_id, handoff_id),
+            )
+            row = self.db.execute("SELECT * FROM handoffs WHERE project_id=? AND id=?", (project_id, handoff_id)).fetchone()
+        return self._handoff(row)
+
+    def done_handoff(self, project_id, handoff_id, agent_id=None):
+        now = self.clock()
+        with self._transaction():
+            self._project(project_id, now)
+            row = self.db.execute("SELECT * FROM handoffs WHERE project_id=? AND id=?", (project_id, handoff_id)).fetchone()
+            if row is None:
+                raise KeyError
+            accepted_by = row["accepted_by"] if row["accepted_by"] is not None else agent_id
+            accepted_at = row["accepted_at"] if row["accepted_at"] is not None else now
+            self.db.execute(
+                "UPDATE handoffs SET status='done', accepted_by=?, accepted_at=? WHERE project_id=? AND id=?",
+                (accepted_by, accepted_at, project_id, handoff_id),
+            )
+            row = self.db.execute("SELECT * FROM handoffs WHERE project_id=? AND id=?", (project_id, handoff_id)).fetchone()
+        return self._handoff(row)
+
+    # aliases
+    def handoffs(self, project_id, *a, **kw):
+        return self.list_handoffs(project_id, *a, **kw)
+    def add_handoff(self, *a, **kw):
+        return self.create_handoff(*a, **kw)
+    def post_handoff(self, *a, **kw):
+        return self.create_handoff(*a, **kw)
+    def handoff_create(self, *a, **kw):
+        return self.create_handoff(*a, **kw)
+    def handoff_list(self, *a, **kw):
+        return self.list_handoffs(*a, **kw)
+    def handoff_accept(self, *a, **kw):
+        return self.accept_handoff(*a, **kw)
+    def handoff_done(self, *a, **kw):
+        return self.done_handoff(*a, **kw)
+    def complete_handoff(self, *a, **kw):
+        return self.done_handoff(*a, **kw)
+    def finish_handoff(self, *a, **kw):
+        return self.done_handoff(*a, **kw)
+    def mark_handoff_done(self, *a, **kw):
+        return self.done_handoff(*a, **kw)
+
+    @staticmethod
+    def _handoff(row):
+        return {
+            "id": row["id"],
+            "handoff_id": row["id"],
+            "project": None,
+            "from": row["from_agent"],
+            "to": row["to_agent"],
+            "summary": row["summary"],
+            "context_id": row["context_id"],
+            "status": row["status"],
+            "accepted_by": row["accepted_by"],
+            "accepted_at": (ProjectStore._timestamp(row["accepted_at"]) if row["accepted_at"] is not None else None),
+            "created_at": ProjectStore._timestamp(row["created_at"]),
+        }
+
+
     @staticmethod
     def _payload_hash(payload):
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 
     def post(self, project_id: str, payload: dict) -> tuple[dict, bool]:
         now = self.clock()
