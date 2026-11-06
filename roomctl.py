@@ -395,6 +395,18 @@ def main(argv=None):
     wait = commands.add_parser("wait", help="wait for a message addressed to this agent")
     wait.add_argument("--timeout", type=float)
     commands.add_parser("projects")
+    handoff = commands.add_parser("handoff", help="manage handoffs")
+    handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
+    hc = handoff_sub.add_parser("create")
+    hc.add_argument("--to", required=True)
+    hc.add_argument("--summary", required=True)
+    hc.add_argument("--context-id")
+    hl = handoff_sub.add_parser("list")
+    hl.add_argument("--status")
+    ha = handoff_sub.add_parser("accept")
+    ha.add_argument("id", type=int)
+    hd = handoff_sub.add_parser("done")
+    hd.add_argument("id", type=int)
     commands.add_parser("participants")
     commands.add_parser("status", help="print current agent, relay, project, config path, and listener/state info")
     commands.add_parser("doctor", help="check relay, project membership, and listener health without changing state")
@@ -881,6 +893,15 @@ def main(argv=None):
             return 0
         elif args.command == "projects":
             print(json.dumps(client.projects(), ensure_ascii=False))
+        elif args.command == "handoff":
+            if args.handoff_command == "create":
+                print(json.dumps(client.create_handoff(args.to, args.summary, context_id=args.context_id), ensure_ascii=False))
+            elif args.handoff_command == "list":
+                print(json.dumps(client.handoffs(status=args.status), ensure_ascii=False))
+            elif args.handoff_command == "accept":
+                print(json.dumps(client.accept_handoff(args.id, agent=client.agent_id), ensure_ascii=False))
+            elif args.handoff_command == "done":
+                print(json.dumps(client.done_handoff(args.id, agent=client.agent_id), ensure_ascii=False))
         elif args.command == "doctor":
             checks = doctor_checks(client, config)
             report = {

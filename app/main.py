@@ -21,7 +21,7 @@ from pydantic import (
     field_validator,
 )
 
-from app.client import LOOPBACK_HOSTS
+from app.client import LOOPBACK_HOSTS, validate_agent_id
 from app.store import (
     Conflict,
     NotParticipant,
@@ -42,6 +42,7 @@ _RELAY_SUPPORTS = {
     "messages",
     "participants",
     "listener_presence",
+    "handoffs",
 }
 _LABEL = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -129,8 +130,27 @@ class MessageInput(BaseModel):
         return value
 
 
+class HandoffInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: StrictStr | None = None
+    from_agent: StrictStr | None = None
+    to: StrictStr | None = None
+    to_agent: StrictStr | None = None
+    summary: StrictStr
+    context_id: StrictStr | None = None
+    sender: StrictStr | None = None
+
+    @field_validator("summary")
+    @classmethod
+    def valid_summary(cls, value):
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
+
+
 class BodyLimitMiddleware:
     """Bound streamed JSON bodies before FastAPI parses them."""
+
 
     def __init__(self, app, max_body_bytes: int):
         self.app = app
@@ -393,6 +413,121 @@ def create_app(
             {"messages": messages, "next_after": next_after},
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/v1/handoffs")
+    @app.get("/v1/handoff")
+    def list_handoffs(project: str = Query(min_length=1, max_length=64), status: str | None = Query(default=None), to: str | None = Query(default=None), from_agent: str | None = Query(default=None, alias="from")):
+        try:
+            store = get_store()
+            store._project(project, store.clock())
+            items = store.list_handoffs(project, status=status, to=to, from_agent=from_agent)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="project not found") from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        for item in items:
+            item["project"] = project
+        return JSONResponse({"project": project, "handoffs": items}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/handoffs", status_code=201)
+    @app.post("/v1/handoff", status_code=201)
+    def create_handoff(value: HandoffInput, project: str = Query(default=None, min_length=1, max_length=64)):
+        selected_project = project or value.project
+        if not selected_project:
+            raise HTTPException(status_code=422, detail="project is required")
+        if not _PROJECT.fullmatch(selected_project):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        sender = value.from_agent or value.sender
+        if sender is None:
+            raise HTTPException(status_code=422, detail="from is required")
+        recipient = value.to or value.to_agent
+        if recipient is None:
+            raise HTTPException(status_code=422, detail="to is required")
+        try:
+            validate_agent_id(sender)
+            validate_agent_id(recipient)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from None
+        try:
+            store = get_store()
+            item = store.create_handoff(selected_project, sender, recipient, value.summary, value.context_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="project not found") from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        item["project"] = selected_project
+        return JSONResponse(item, status_code=201, headers={"Cache-Control": "no-store"})
+
+    def _handoff_action(handoff_id: int, project: str, agent: str | None, action: str):
+        try:
+            store = get_store()
+            store._project(project, store.clock())
+        except KeyError:
+            raise HTTPException(status_code=404, detail="project not found") from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        try:
+            if action == "accept":
+                item = store.accept_handoff(project, handoff_id, agent)
+            else:
+                item = store.done_handoff(project, handoff_id, agent)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="handoff not found") from None
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        item["project"] = project
+        return JSONResponse(item, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/handoffs/{handoff_id}/accept")
+    @app.post("/v1/handoff/{handoff_id}/accept")
+    def accept_handoff(handoff_id: int, project: str = Query(min_length=1, max_length=64), agent: str | None = Query(default=None, min_length=1, max_length=64)):
+        return _handoff_action(handoff_id, project, agent, "accept")
+
+    @app.post("/v1/handoffs/{handoff_id}/done")
+    @app.post("/v1/handoffs/{handoff_id}/complete")
+    @app.post("/v1/handoff/{handoff_id}/done")
+    @app.post("/v1/handoff/{handoff_id}/complete")
+    def done_handoff(handoff_id: int, project: str = Query(min_length=1, max_length=64), agent: str | None = Query(default=None, min_length=1, max_length=64)):
+        return _handoff_action(handoff_id, project, agent, "done")
+
+    @app.get("/dashboard")
+    def dashboard():
+        store = get_store()
+        projects = store.projects()
+        parts = []
+        parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'><title>Agent Commons Dashboard</title></head><body>")
+        parts.append("<h1>Agent Commons Dashboard</h1>")
+        parts.append("<p>Relay health: ok</p>")
+        for p in projects:
+            pid = p["project"]
+            parts.append(f"<h2>{pid}</h2>")
+            try:
+                participants = store.participants(pid)
+            except Exception:
+                participants = []
+            parts.append("<ul>")
+            for part in participants:
+                parts.append(f"<li>{part['agent_id']} last_seen={part['last_seen']}</li>")
+            parts.append("</ul>")
+            try:
+                handoffs = store.list_handoffs(pid)
+            except Exception:
+                handoffs = []
+            parts.append("<h3>Handoffs</h3><ul>")
+            for h in handoffs:
+                parts.append(f"<li>#{h['id']} {h['from']} -&gt; {h['to']} [{h['status']}] {h['summary']}</li>")
+            parts.append("</ul>")
+            try:
+                msgs, _ = store.read(pid, after=0, limit=10)
+            except Exception:
+                msgs = []
+            parts.append("<h3>Recent messages</h3><ul>")
+            for m in msgs:
+                parts.append(f"<li>#{m['seq']} {m['sender']} -&gt; {m['recipient']}: {m['text']}</li>")
+            parts.append("</ul>")
+        parts.append("</body></html>")
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse("".join(parts))
 
     return app
 
